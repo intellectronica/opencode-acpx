@@ -1,5 +1,5 @@
 export const PACKAGE_NAME = "opencode-acpx";
-export const PACKAGE_VERSION = "0.1.0";
+export const PACKAGE_VERSION = "0.0.1";
 export const RPC_PROTOCOL_VERSION = 1;
 export const SESSION_SCHEMA_VERSION = 1;
 

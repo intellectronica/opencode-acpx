@@ -188,7 +188,7 @@ command. The remote command must emit ACP NDJSON on stdout and logs on stderr:
     "mac-mini",
     "PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\" exec hermes acp",
   ],
-  "cwd": "/Users/eleanor",
+  "cwd": "/Users/example",
   "authProfile": "fnord-mac-mini",
 }
 ```

@@ -1,56 +1,43 @@
 # Changelog
 
-All notable changes to this private package are recorded here. The format is
-based on Keep a Changelog and the package uses Semantic Versioning for its
-plugin contract.
+All notable changes to this project are documented here. The format is based on
+Keep a Changelog and the package uses Semantic Versioning.
 
 ## [Unreleased]
 
-### Added
-
-- Stable OpenCode model variants for ACP thought level, reasoning effort,
-  model-scoped configuration and Cursor parameter controls, with exact typed
-  selection before prompting.
-- ACP stdio operation through explicitly configured SSH commands, including
-  remote Hermes model discovery and selection.
-- Native OpenCode shell, read, list, search, edit, write, web, todo and task
-  presentation for recognised ACP tool activity, with structured ACP metadata
-  retained on fallback cards.
-- Cursor, Claude, Codex and Grok subagent activity projection, plus the shared
-  ACP task-shape fallback used by Hermes and custom agents.
-
-### Fixed
-
-- Reuse a validated last-known-good ACP model/config catalogue across OpenCode
-  processes and workspaces when a live startup probe is temporarily unavailable,
-  while keeping workspace commands isolated.
-- Keep whitelisted ACP providers visible and their exact model IDs routable
-  when a startup catalogue probe is temporarily unavailable.
-- Start workers through Electron's verified Node mode or a resolved absolute
-  Node fallback, retain a stable worker `PATH`, and share identical workers
-  within an OpenCode plugin context so delayed project instances initialise.
-- Keep every effort/fast combination available when an ACP session's sticky
-  current selection changes.
-- Handle OpenCode title/summary/compaction agents locally so one user turn does
-  not create duplicate remote ACP sessions.
-- Suppress summary-only todo and anonymous status cards after native todo
-  projection.
-- Preserve OpenCode provider whitelist/blacklist settings when injecting an ACP
-  provider, including base-ID expansion for parameterised Cursor model IDs.
-- Correlate session-less Cursor task notifications by tool-call ID and suppress
-  redundant control-tool cards for informational task/todo extensions.
-
-## [0.1.0] - 2026-08-15
+## [0.0.1] - 2026-08-15
 
 ### Added
 
 - One-package OpenCode server, TUI, internal `LanguageModelV3` provider and
-  Node worker design.
-- Exact Acpx, ACP SDK, AI SDK and OpenCode compatibility pins.
-- Cursor, Claude, Codex, Grok Build and Hermes presets.
-- Persistent ACP session identity, per-session ordering and idempotency ledger.
-- Streaming text, reasoning, remote tool, usage and interaction translation.
-- Fail-closed OpenCode permission bridge.
-- Dynamic session model/config/command discovery with configured fallbacks.
-- Deterministic ACP stdio fixture, integration suite and packaging checks.
-- Architecture, security, configuration, compatibility and testing guides.
+  isolated Node worker.
+- Cursor, Claude, Codex, Grok Build, Hermes and custom ACP v1 presets.
+- Dynamic model, configuration and command discovery with explicit fallbacks
+  and OpenCode provider filtering.
+- Stable OpenCode variants for ACP thought level, reasoning effort,
+  model-scoped configuration and Cursor parameter controls.
+- Persistent ACP session identity, per-session ordering, cancellation,
+  idempotency and process cleanup.
+- Streaming text, reasoning, usage, plans, native tool presentation, todos and
+  subagent activity.
+- Fail-closed OpenCode permission, question, elicitation and vendor-interaction
+  bridges.
+- ACP stdio operation through explicitly configured SSH commands.
+- Deterministic unit, worker, real-process ACP integration and packaging tests.
+- Architecture, configuration, compatibility, security and testing guides.
+
+### Fixed
+
+- Retain whitelisted ACP providers and last-known-good catalogues when a live
+  startup probe is temporarily unavailable.
+- Preserve every effort and fast-mode combination across ACP sticky session
+  selection and OpenCode processes.
+- Avoid duplicate remote ACP sessions for OpenCode title, summary and
+  compaction agents.
+- Keep model IDs opaque, including Cursor parameterised and Hermes
+  provider-qualified identifiers.
+- Correlate session-less task notifications and suppress redundant
+  informational tool cards after native projection.
+
+[Unreleased]: https://github.com/intellectronica/opencode-acpx/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/intellectronica/opencode-acpx/releases/tag/v0.0.1

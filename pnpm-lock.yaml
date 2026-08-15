@@ -26,9 +26,6 @@ importers:
       '@opencode-ai/plugin':
         specifier: 1.18.18
         version: 1.18.18
-      acpx:
-        specifier: 0.13.0
-        version: 0.13.0(patch_hash=c595db514816e23d7d1a65fe808ab313c2526ca27846cbc426287e89646aa362)
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -42,6 +39,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: 4.0.1
         version: 4.0.1(supports-color@7.2.0)(vitest@4.0.1(@types/node@24.10.1)(supports-color@7.2.0)(tsx@4.23.12)(yaml@2.9.0))
+      acpx:
+        specifier: 0.13.0
+        version: 0.13.0(patch_hash=c595db514816e23d7d1a65fe808ab313c2526ca27846cbc426287e89646aa362)
       ai:
         specifier: 6.0.168
         version: 6.0.168(zod@4.4.3)
