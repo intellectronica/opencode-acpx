@@ -1,0 +1,9 @@
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: false
+  opencode-ai: false
+minimumReleaseAgeExclude:
+  - "@agentclientprotocol/claude-agent-acp@0.68.0"
+  - "@agentclientprotocol/codex-acp@1.3.0"
+patchedDependencies:
+  acpx@0.13.0: patches/acpx@0.13.0.patch

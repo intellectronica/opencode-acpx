@@ -1,0 +1,306 @@
+diff --git a/dist/live-checkpoint-CBecfnSH.js b/dist/live-checkpoint-CBecfnSH.js
+index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac186db62f97 100644
+--- a/dist/live-checkpoint-CBecfnSH.js
++++ b/dist/live-checkpoint-CBecfnSH.js
+@@ -1667,7 +1667,8 @@ const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
+ 	"agent_capabilities",
+ 	"messages.Agent.content.ToolUse.input",
+ 	"acpx.desired_config_options",
+-	"acpx.config_options"
++	"acpx.config_options",
++	"acpx.session_options.env"
+ ]);
+ function isRecord(value) {
+ 	return !!value && typeof value === "object" && !Array.isArray(value);
+@@ -3914,7 +3915,8 @@ function resolveClientCapabilities(params) {
+ 			readTextFile: params.fs,
+ 			writeTextFile: params.fs
+ 		},
+-		terminal: params.terminal
++		terminal: params.terminal,
++		...params.elicitation ? { elicitation: { form: {}, url: {} } } : {}
+ 	};
+ 	if (!params.devinAcp) return baseCapabilities;
+ 	return {
+@@ -4235,7 +4237,20 @@ var AcpClient = class {
+ 			requestPermission: async (params) => {
+ 				return this.handlePermissionRequest(params);
+ 			},
+-			extMethod: async (method) => {
++			unstable_createElicitation: async (params) => {
++				if (!this.options.onElicitationRequest) return { action: "cancel" };
++				const response = await this.options.onElicitationRequest(params, {
++					signal: this.compatibilityRequestSignal(params)
++				});
++				return response ?? { action: "cancel" };
++			},
++			unstable_completeElicitation: async (params) => {
++				await this.options.onElicitationComplete?.(params);
++			},
++			extMethod: async (method, params) => {
++				if (this.options.onExtensionRequest) return await this.options.onExtensionRequest(method, params, {
++					signal: this.compatibilityRequestSignal(params)
++				});
+ 				if (launch.devinAcp && isDevinRequestDiagnosticsMethod(method)) return {};
+ 				const error = RequestError.methodNotFound(method);
+ 				if (!this.options.suppressSdkConsoleErrors) console.error(error.message);
+@@ -4262,9 +4277,16 @@ var AcpClient = class {
+ 			releaseTerminal: async (params) => {
+ 				return this.handleReleaseTerminal(params);
+ 			},
+-			extNotification: async () => {}
++			extNotification: async (method, params) => {
++				await this.options.onExtensionNotification?.(method, params);
++			}
+ 		}), stream);
+ 	}
++	compatibilityRequestSignal(params) {
++		const paramsSessionId = params && typeof params === "object" && !Array.isArray(params) && typeof params.sessionId === "string" ? params.sessionId : void 0;
++		const sessionId = paramsSessionId ?? this.activePrompt?.sessionId;
++		return sessionId ? this.cancellationSignalForSession(sessionId) : new AbortController().signal;
++	}
+ 	async initializeAgentConnection(params) {
+ 		try {
+ 			const initResult = await Promise.race([this.initializeProtocolConnection(params.connection, params.launch), params.startupFailure.promise]);
+@@ -4283,12 +4305,15 @@ var AcpClient = class {
+ 			clientCapabilities: resolveClientCapabilities({
+ 				devinAcp: launch.devinAcp,
+ 				fs: this.options.fs !== false,
+-				terminal: this.options.terminal !== false
++				terminal: this.options.terminal !== false,
++				elicitation: Boolean(this.options.onElicitationRequest)
+ 			}),
+ 			clientInfo: resolveClientInfo(launch.devinAcp)
+ 		});
+ 		const initialized = launch.geminiAcp ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs()) : await initializePromise;
+-		await this.authenticateIfRequired(connection, initialized.authMethods ?? []);
++		const authMethods = initialized.authMethods ?? [];
++		await this.notifyAuthMetadata({ status: "advertised", authMethods });
++		await this.authenticateIfRequired(connection, authMethods);
+ 		return initialized;
+ 	}
+ 	async handleInitializeFailure(params, error) {
+@@ -4306,6 +4331,10 @@ var AcpClient = class {
+ 	createTappedStream(base) {
+ 		const onAcpMessage = () => this.eventHandlers.onAcpMessage;
+ 		const onAcpOutputMessage = () => this.eventHandlers.onAcpOutputMessage;
++		const onRuntimeAcpMessage = () => this.options.onRuntimeAcpMessage;
++		const logRuntimeObserverError = (error) => {
++			this.log(`runtime ACP message observer failed: ${error instanceof Error ? error.message : String(error)}`);
++		};
+ 		const shouldSuppressInboundReplaySessionUpdate = (message) => {
+ 			return this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message);
+ 		};
+@@ -4317,6 +4346,11 @@ var AcpClient = class {
+ 						const { value, done } = await reader.read();
+ 						if (done) break;
+ 						if (!value) continue;
++						try {
++							await onRuntimeAcpMessage()?.("inbound", value);
++						} catch (error) {
++							logRuntimeObserverError(error);
++						}
+ 						if (!shouldSuppressInboundReplaySessionUpdate(value)) {
+ 							onAcpOutputMessage()?.("inbound", value);
+ 							onAcpMessage()?.("inbound", value);
+@@ -4331,6 +4365,11 @@ var AcpClient = class {
+ 			writable: new WritableStream({ async write(message) {
+ 				onAcpOutputMessage()?.("outbound", message);
+ 				onAcpMessage()?.("outbound", message);
++				try {
++					await onRuntimeAcpMessage()?.("outbound", message);
++				} catch (error) {
++					logRuntimeObserverError(error);
++				}
+ 				const writer = base.writable.getWriter();
+ 				try {
+ 					await writer.write(message);
+@@ -4799,8 +4838,38 @@ var AcpClient = class {
+ 			this.log(`agent advertised auth methods [${methods.map((m) => m.id).join(", ")}] but no matching credentials found — skipping (agent may handle auth internally)`);
+ 			return;
+ 		}
+-		await connection.authenticate({ methodId: selected.methodId });
+-		this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
++		await this.notifyAuthMetadata({
++			status: "selected",
++			authMethods: methods,
++			selectedMethodId: selected.methodId,
++			source: selected.source
++		});
++		try {
++			await connection.authenticate({ methodId: selected.methodId });
++			await this.notifyAuthMetadata({
++				status: "authenticated",
++				authMethods: methods,
++				selectedMethodId: selected.methodId,
++				source: selected.source
++			});
++			this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
++		} catch (error) {
++			await this.notifyAuthMetadata({
++				status: "failed",
++				authMethods: methods,
++				selectedMethodId: selected.methodId,
++				source: selected.source,
++				error: error instanceof Error ? error.message : String(error)
++			});
++			throw error;
++		}
++	}
++	async notifyAuthMetadata(metadata) {
++		try {
++			await this.options.onAuthMetadata?.(metadata);
++		} catch (error) {
++			this.log(`runtime auth metadata observer failed: ${error instanceof Error ? error.message : String(error)}`);
++		}
+ 	}
+ 	async handlePermissionRequest(params) {
+ 		if (this.cancellingSessionIds.has(params.sessionId)) return cancelledPermissionResponse();
+@@ -4999,6 +5068,12 @@ var AcpClient = class {
+ 	async handleSessionUpdate(notification) {
+ 		const sequence = ++this.observedSessionUpdates;
+ 		this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
++			try {
++				await this.options.onRuntimeSessionUpdate?.(notification);
++			} catch (error) {
++				const message = error instanceof Error ? error.message : String(error);
++				this.log(`runtime session update observer failed: ${message}`);
++			}
+ 			try {
+ 				if (!this.suppressSessionUpdates) this.eventHandlers.onSessionUpdate?.(notification);
+ 			} catch (error) {
+diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
+index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4fea8ea27 100644
+--- a/dist/runtime.d.ts
++++ b/dist/runtime.d.ts
+@@ -1,7 +1,7 @@
+ import { a as AcpPermissionRequest, c as NonInteractivePermissionPolicy, f as SessionRecord, i as AcpPermissionDecision, l as PermissionMode, n as SystemPromptOption, s as McpServer$1, t as SessionAgentOptions } from "./session-options-CTdZvr68.js";
+ import { a as RequestedModelUnsupportedErrorCode, i as RequestedModelUnsupportedError, n as REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, o as RequestedModelUnsupportedReason, r as REQUESTED_MODEL_UNSUPPORTED_REASONS, s as isRequestedModelUnsupportedError, t as AcpClient } from "./client-BeKvumq9.js";
+ import fs from "node:fs";
+-import { ToolCallContent, ToolCallLocation, ToolKind } from "@agentclientprotocol/sdk";
++import { AnyMessage, AuthMethod, CompleteElicitationNotification, CreateElicitationRequest, CreateElicitationResponse, SessionNotification, ToolCallContent, ToolCallLocation, ToolKind } from "@agentclientprotocol/sdk";
+ //#region src/agent-registry.d.ts
+ declare const DEFAULT_AGENT_NAME = "codex";
+ //#endregion
+@@ -10,6 +10,17 @@ type AcpRuntimePromptMode = "prompt" | "steer";
+ type AcpRuntimeSessionMode = "persistent" | "oneshot";
+ type AcpSessionUpdateTag = "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "usage_update" | "available_commands_update" | "current_mode_update" | "config_option_update" | "session_info_update" | "plan" | (string & {});
+ type AcpRuntimeControl = "session/set_mode" | "session/set_config_option" | "session/status";
++type AcpRuntimeRawMessageDirection = "outbound" | "inbound";
++type AcpRuntimeRequestContext = {
++  signal: AbortSignal;
++};
++type AcpRuntimeAuthMetadata = {
++  status: "advertised" | "selected" | "authenticated" | "failed";
++  authMethods: AuthMethod[];
++  selectedMethodId?: string;
++  source?: "env" | "config" | "agent";
++  error?: string;
++};
+ type AcpRuntimeHandle = {
+   sessionKey: string;
+   backend: string;
+@@ -273,6 +284,13 @@ type AcpRuntimeOptions = {
+   onPermissionRequest?: (req: AcpPermissionRequest, ctx: {
+     signal: AbortSignal;
+   }) => Promise<AcpPermissionDecision | undefined>;
++  onRawMessage?: (direction: AcpRuntimeRawMessageDirection, message: AnyMessage) => void | Promise<void>;
++  onSessionUpdate?: (notification: SessionNotification) => void | Promise<void>;
++  onElicitationRequest?: (request: CreateElicitationRequest, ctx: AcpRuntimeRequestContext) => Promise<CreateElicitationResponse | undefined>;
++  onElicitationComplete?: (notification: CompleteElicitationNotification) => void | Promise<void>;
++  onExtensionRequest?: (method: string, params: unknown, ctx: AcpRuntimeRequestContext) => Promise<unknown>;
++  onExtensionNotification?: (method: string, params: unknown) => void | Promise<void>;
++  onAuthMetadata?: (metadata: AcpRuntimeAuthMetadata) => void | Promise<void>;
+ };
+ type AcpFileSessionStoreOptions = {
+   stateDir: string;
+@@ -390,6 +408,7 @@ declare function decodeAcpxRuntimeHandleState(runtimeSessionName: string): AcpxH
+ //#endregion
+ //#region src/runtime.d.ts
+ declare const ACPX_BACKEND_ID = "acpx";
++declare const ACPX_RUNTIME_COMPAT_HOOKS_VERSION = 1;
+ type AcpxRuntimeLike = AcpRuntime & {
+   probeAvailability(): Promise<void>;
+   isHealthy(): boolean;
+@@ -465,5 +484,5 @@ declare function createRuntimeStore(options: {
+   stateDir: string;
+ }): AcpSessionStore;
+ //#endregion
+-export { ACPX_BACKEND_ID, type AcpAgentRegistry, type AcpFileSessionStoreOptions, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeAvailableCommand, type AcpRuntimeCapabilities, type AcpRuntimeDoctorReport, type AcpRuntimeEnsureInput, AcpRuntimeError, type AcpRuntimeErrorCode, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeOptions, type AcpRuntimePromptMode, type AcpRuntimeSessionMode, type AcpRuntimeSessionModels, type AcpRuntimeSessionUsage, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpRuntimeTurnAttachment, type AcpRuntimeTurnInput, type AcpRuntimeTurnResult, type AcpRuntimeTurnResultError, type AcpRuntimeUsageBreakdown, type AcpRuntimeUsageCost, type AcpSessionRecord, type AcpSessionStore, type AcpSessionUpdateTag, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, type RequestedModelUnsupportedErrorCode, type RequestedModelUnsupportedReason, type SessionAgentOptions, type SystemPromptOption, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
++export { ACPX_BACKEND_ID, ACPX_RUNTIME_COMPAT_HOOKS_VERSION, type AcpAgentRegistry, type AcpFileSessionStoreOptions, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeAuthMetadata, type AcpRuntimeAvailableCommand, type AcpRuntimeCapabilities, type AcpRuntimeDoctorReport, type AcpRuntimeEnsureInput, AcpRuntimeError, type AcpRuntimeErrorCode, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeOptions, type AcpRuntimePromptMode, type AcpRuntimeRawMessageDirection, type AcpRuntimeRequestContext, type AcpRuntimeSessionMode, type AcpRuntimeSessionModels, type AcpRuntimeSessionUsage, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpRuntimeTurnAttachment, type AcpRuntimeTurnInput, type AcpRuntimeTurnResult, type AcpRuntimeTurnResultError, type AcpRuntimeUsageBreakdown, type AcpRuntimeUsageCost, type AcpSessionRecord, type AcpSessionStore, type AcpSessionUpdateTag, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, type RequestedModelUnsupportedErrorCode, type RequestedModelUnsupportedReason, type SessionAgentOptions, type SystemPromptOption, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
+ //# sourceMappingURL=runtime.d.ts.map
+\ No newline at end of file
+diff --git a/dist/runtime.js b/dist/runtime.js
+index 3fb25ae4124cea292546e1dda95465b3ae15577e..4ddc949258367676e2a9b829521b12b8ed75cab3 100644
+--- a/dist/runtime.js
++++ b/dist/runtime.js
+@@ -745,7 +745,17 @@ var AcpRuntimeManager = class {
+ 		this.deps = deps;
+ 	}
+ 	createClient(options) {
+-		return this.deps.clientFactory?.(options) ?? new AcpClient(options);
++		const compatibilityOptions = {
++			onRuntimeAcpMessage: this.options.onRawMessage,
++			onRuntimeSessionUpdate: this.options.onSessionUpdate,
++			onElicitationRequest: this.options.onElicitationRequest,
++			onElicitationComplete: this.options.onElicitationComplete,
++			onExtensionRequest: this.options.onExtensionRequest,
++			onExtensionNotification: this.options.onExtensionNotification,
++			onAuthMetadata: this.options.onAuthMetadata
++		};
++		const mergedOptions = { ...options, ...compatibilityOptions };
++		return this.deps.clientFactory?.(mergedOptions) ?? new AcpClient(mergedOptions);
+ 	}
+ 	async readPendingPersistentClient(record, options) {
+ 		const pendingClient = this.pendingPersistentClients.get(record.acpxRecordId);
+@@ -1513,6 +1523,7 @@ function createProbeClient(options, agentCommand, deps) {
+ //#endregion
+ //#region src/runtime.ts
+ const ACPX_BACKEND_ID = "acpx";
++const ACPX_RUNTIME_COMPAT_HOOKS_VERSION = 1;
+ const ACPX_CAPABILITIES = { controls: [
+ 	"session/set_mode",
+ 	"session/set_config_option",
+@@ -1725,6 +1736,6 @@ function createRuntimeStore(options) {
+ 	return createFileSessionStore(options);
+ }
+ //#endregion
+-export { ACPX_BACKEND_ID, AcpRuntimeError, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
++export { ACPX_BACKEND_ID, ACPX_RUNTIME_COMPAT_HOOKS_VERSION, AcpRuntimeError, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
+ 
+ //# sourceMappingURL=runtime.js.map
+\ No newline at end of file
+diff --git a/dist/session-options-CTdZvr68.d.ts b/dist/session-options-CTdZvr68.d.ts
+index 3ec271cc95b43ad598f182652c391d17f28fc695..0ecfcc91db15eff609ef2dd376b7a7cd64f51aad 100644
+--- a/dist/session-options-CTdZvr68.d.ts
++++ b/dist/session-options-CTdZvr68.d.ts
+@@ -1,4 +1,4 @@
+-import { AgentCapabilities, AnyMessage, ContentBlock, McpServer, McpServer as McpServer$1, RequestPermissionRequest, SessionConfigOption, SessionNotification, SetSessionConfigOptionResponse, ToolKind } from "@agentclientprotocol/sdk";
++import { AgentCapabilities, AnyMessage, AuthMethod, CompleteElicitationNotification, ContentBlock, CreateElicitationRequest, CreateElicitationResponse, McpServer, McpServer as McpServer$1, RequestPermissionRequest, SessionConfigOption, SessionNotification, SetSessionConfigOptionResponse, ToolKind } from "@agentclientprotocol/sdk";
+ //#region src/prompt-content.d.ts
+ type PromptInput = ContentBlock[];
+ //#endregion
+@@ -102,6 +102,23 @@ type AcpClientOptions = {
+   onPermissionRequest?: (req: AcpPermissionRequest, ctx: {
+     signal: AbortSignal;
+   }) => Promise<AcpPermissionDecision | undefined>;
++  onRuntimeAcpMessage?: (direction: AcpMessageDirection, message: AcpJsonRpcMessage) => void | Promise<void>;
++  onRuntimeSessionUpdate?: (notification: SessionNotification) => void | Promise<void>;
++  onElicitationRequest?: (request: CreateElicitationRequest, ctx: {
++    signal: AbortSignal;
++  }) => Promise<CreateElicitationResponse | undefined>;
++  onElicitationComplete?: (notification: CompleteElicitationNotification) => void | Promise<void>;
++  onExtensionRequest?: (method: string, params: unknown, ctx: {
++    signal: AbortSignal;
++  }) => Promise<unknown>;
++  onExtensionNotification?: (method: string, params: unknown) => void | Promise<void>;
++  onAuthMetadata?: (metadata: {
++    status: "advertised" | "selected" | "authenticated" | "failed";
++    authMethods: AuthMethod[];
++    selectedMethodId?: string;
++    source?: "env" | "config" | "agent";
++    error?: string;
++  }) => void | Promise<void>;
+ };
+ declare const SESSION_RECORD_SCHEMA: "acpx.session.v1";
+ type SessionMessageImage = {
