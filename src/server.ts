@@ -38,7 +38,11 @@ import { providerId, resolvePreset } from "./presets.js";
 import { registerProviderRuntime } from "./registry.js";
 import { createSessionKey } from "./session/identity.js";
 import { BindingLedger } from "./session/ledger.js";
-import { WorkerClient, type WorkerClientOptions } from "./worker/client.js";
+import {
+  WorkerClient,
+  WorkerRequestError,
+  type WorkerClientOptions,
+} from "./worker/client.js";
 import type { CatalogueResult, RuntimeWorkerEvent } from "./worker/messages.js";
 
 type ProviderModelConfig = NonNullable<
@@ -66,6 +70,19 @@ interface ServerDependencies {
   pluginInstanceId?: () => string;
   providerUrl?: URL;
   workerPath?: string;
+  shareWorker?: boolean;
+}
+
+interface WorkerLease {
+  worker: WorkerClient;
+  ready: Promise<unknown>;
+  release: () => Promise<void>;
+}
+
+interface SharedWorkerEntry {
+  worker: WorkerClient;
+  ready: Promise<unknown>;
+  references: number;
 }
 
 const SOURCE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -81,11 +98,24 @@ export function createServerPlugin(
     const createWorker =
       dependencies.createWorkerClient ??
       ((workerOptions) => new WorkerClient(workerOptions));
-    const worker = createWorker({
+    const workerOptions: WorkerClientOptions = {
       workerPath: dependencies.workerPath ?? DEFAULT_WORKER_PATH,
       pluginOptions: options,
       onDiagnostic: () => logDiagnostic(input, "warn", "ACP_WORKER_STDERR"),
+    };
+    const workerLease = acquireWorkerLease({
+      createWorker,
+      workerOptions,
+      configure: {
+        pluginInstanceId,
+        directory: input.directory,
+        options,
+      },
+      shared:
+        dependencies.shareWorker ??
+        dependencies.createWorkerClient === undefined,
     });
+    const worker = workerLease.worker;
     const broker = new PermissionInteractionBroker({
       mode: options.permissions.default,
       fallback: options.permissions.fallback,
@@ -117,14 +147,11 @@ export function createServerPlugin(
     });
 
     try {
-      await worker.configure({
-        pluginInstanceId,
-        directory: input.directory,
-        options,
-      });
-    } catch {
+      await workerLease.ready;
+    } catch (error) {
+      logDiagnostic(input, "error", workerInitialisationDiagnostic(error));
       unsubscribe();
-      await worker.dispose().catch(() => undefined);
+      await workerLease.release().catch(() => undefined);
       throw new Error("Unable to initialise the plugin-owned ACP worker");
     }
 
@@ -336,10 +363,79 @@ export function createServerPlugin(
         disposed = true;
         unsubscribe();
         for (const unregister of unregisterRuntimes.splice(0)) unregister();
-        await worker.dispose();
+        await workerLease.release();
       },
     };
     return hooks;
+  };
+}
+
+const SHARED_WORKER_POOL_KEY = Symbol.for("opencode-acpx.worker-pool.v1");
+
+function sharedWorkerPool(): Map<string, SharedWorkerEntry> {
+  const root = process as unknown as Record<
+    symbol,
+    Map<string, SharedWorkerEntry> | undefined
+  >;
+  const existing = root[SHARED_WORKER_POOL_KEY];
+  if (existing !== undefined) return existing;
+  const pool = new Map<string, SharedWorkerEntry>();
+  root[SHARED_WORKER_POOL_KEY] = pool;
+  return pool;
+}
+
+function acquireWorkerLease(input: {
+  createWorker: (options: WorkerClientOptions) => WorkerClient;
+  workerOptions: WorkerClientOptions;
+  configure: {
+    pluginInstanceId: string;
+    directory: string;
+    options: AcpxPluginOptions;
+  };
+  shared: boolean;
+}): WorkerLease {
+  if (!input.shared) {
+    const worker = input.createWorker(input.workerOptions);
+    let released = false;
+    return {
+      worker,
+      ready: worker.configure(input.configure),
+      release: async () => {
+        if (released) return;
+        released = true;
+        await worker.dispose();
+      },
+    };
+  }
+
+  const pool = sharedWorkerPool();
+  const key = `${input.workerOptions.workerPath}\u0000${JSON.stringify(
+    input.workerOptions.pluginOptions,
+  )}`;
+  let entry = pool.get(key);
+  if (entry === undefined) {
+    const worker = input.createWorker(input.workerOptions);
+    entry = {
+      worker,
+      ready: worker.configure(input.configure),
+      references: 0,
+    };
+    pool.set(key, entry);
+  }
+  entry.references += 1;
+  const leasedEntry = entry;
+  let released = false;
+  return {
+    worker: leasedEntry.worker,
+    ready: leasedEntry.ready,
+    release: async () => {
+      if (released) return;
+      released = true;
+      leasedEntry.references -= 1;
+      if (leasedEntry.references > 0) return;
+      if (pool.get(key) === leasedEntry) pool.delete(key);
+      await leasedEntry.worker.dispose();
+    },
   };
 }
 
@@ -589,6 +685,58 @@ function ensureFilteredModelFallbacks(
       );
     }
   }
+}
+
+function workerInitialisationDiagnostic(error: unknown): string {
+  const errorCode =
+    error instanceof WorkerRequestError
+      ? error.code
+      : typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+        ? error.code
+        : undefined;
+  if (errorCode === "ENOENT" && error instanceof Error) {
+    for (const operation of [
+      "mkdir",
+      "open",
+      "rename",
+      "stat",
+      "lstat",
+      "scandir",
+      "chdir",
+      "spawn",
+    ]) {
+      if (error.message.toLowerCase().includes(operation)) {
+        return `ACP_WORKER_INITIALISE_FAILED_ENOENT_${operation.toUpperCase()}`;
+      }
+    }
+  }
+  if (errorCode !== undefined) {
+    const code = errorCode
+      .toUpperCase()
+      .replaceAll(/[^A-Z0-9_]/g, "_")
+      .slice(0, 80);
+    const boundary = error instanceof WorkerRequestError ? "WORKER" : "PROCESS";
+    return `ACP_WORKER_INITIALISE_FAILED_${boundary}_${code || "REQUEST"}`;
+  }
+  if (!(error instanceof Error)) return "ACP_WORKER_INITIALISE_FAILED_UNKNOWN";
+  if (error.message === "ACP worker is closed")
+    return "ACP_WORKER_INITIALISE_FAILED_CLOSED";
+  if (error.message.includes("unknown response id"))
+    return "ACP_WORKER_INITIALISE_FAILED_RESPONSE_ID";
+  if (error.message.includes("before worker.ready"))
+    return "ACP_WORKER_INITIALISE_FAILED_EARLY_FRAME";
+  if (error.message.includes("did not become ready"))
+    return "ACP_WORKER_INITIALISE_FAILED_READY_TIMEOUT";
+  if (error.message.includes("readiness identity mismatch"))
+    return "ACP_WORKER_INITIALISE_FAILED_IDENTITY";
+  if (error.message.includes("exited unexpectedly"))
+    return "ACP_WORKER_INITIALISE_FAILED_EXIT";
+  if (error.message.includes("invalid"))
+    return "ACP_WORKER_INITIALISE_FAILED_PROTOCOL";
+  return "ACP_WORKER_INITIALISE_FAILED_INTERNAL";
 }
 
 function injectSkillPaths(

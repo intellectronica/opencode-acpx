@@ -206,6 +206,59 @@ describe("server plugin", () => {
     await hooks.dispose?.();
   });
 
+  it("logs only a redacted worker error code when initialisation fails", async () => {
+    const worker = fakeWorker();
+    worker.configure.mockRejectedValue(
+      new Error("worker exited unexpectedly with secret-token-value"),
+    );
+    const log = vi.fn(async () => ({}));
+    const plugin = createServerPlugin({
+      createWorkerClient: () => worker as unknown as WorkerClient,
+      pluginInstanceId: () => "instance-init-failure",
+    });
+
+    await expect(plugin(pluginInput(log), options())).rejects.toThrow(
+      "Unable to initialise the plugin-owned ACP worker",
+    );
+
+    expect(log).toHaveBeenCalledWith({
+      body: {
+        service: "opencode-acpx",
+        level: "error",
+        message: "ACP_WORKER_INITIALISE_FAILED_EXIT",
+      },
+      query: { directory: TEST_DIRECTORY },
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret-token-value");
+  });
+
+  it("shares one worker across matching OpenCode project instances", async () => {
+    const worker = fakeWorker();
+    const createWorkerClient = vi.fn(() => worker as unknown as WorkerClient);
+    const plugin = createServerPlugin({
+      createWorkerClient,
+      pluginInstanceId: vi
+        .fn()
+        .mockReturnValueOnce("shared-instance-1")
+        .mockReturnValueOnce("shared-instance-2"),
+      workerPath: "/plugin/shared-worker.js",
+      shareWorker: true,
+    });
+
+    const first = await plugin(pluginInput(), options());
+    const second = await plugin(
+      { ...pluginInput(), directory: "/second", worktree: "/second" },
+      options(),
+    );
+
+    expect(createWorkerClient).toHaveBeenCalledOnce();
+    expect(worker.configure).toHaveBeenCalledOnce();
+    await first.dispose?.();
+    expect(worker.dispose).not.toHaveBeenCalled();
+    await second.dispose?.();
+    expect(worker.dispose).toHaveBeenCalledOnce();
+  });
+
   it("routes only the matching provider and closes its session on deletion", async () => {
     const worker = fakeWorker();
     const plugin = createServerPlugin({

@@ -1,5 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { constants } from "node:fs";
+import { accessSync } from "node:fs";
+import { delimiter, extname, isAbsolute, join } from "node:path";
 
 import type { AcpPermissionDecision } from "acpx/runtime";
 
@@ -32,6 +35,8 @@ import { TurnChannel } from "./turn-channel.js";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_DISPOSE_TIMEOUT_MS = 2_500;
+const DEFAULT_WORKER_PATH_ENVIRONMENT = process.env.PATH;
+const DEFAULT_WORKER_NODE_RUNTIME = resolveWorkerNodeRuntime();
 
 interface PendingRequest {
   method: WorkerMethod;
@@ -97,9 +102,16 @@ export class WorkerClient {
     this.#exitPromise = new Promise<void>((resolve) => {
       this.#resolveExit = resolve;
     });
-    this.#child = spawn(options.nodeCommand ?? "node", [options.workerPath], {
+    const workerRuntime =
+      options.nodeCommand === undefined
+        ? DEFAULT_WORKER_NODE_RUNTIME
+        : { command: options.nodeCommand, electronRunAsNode: false };
+    this.#child = spawn(workerRuntime.command, [options.workerPath], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: this.#workerEnvironment(options.pluginOptions),
+      env: this.#workerEnvironment(
+        options.pluginOptions,
+        workerRuntime.electronRunAsNode,
+      ),
       windowsHide: true,
     });
     this.#child.stdout.on("data", (chunk: Buffer) => this.#handleChunk(chunk));
@@ -462,7 +474,10 @@ export class WorkerClient {
     for (const turn of this.#turns.values()) turn.fail(error);
   }
 
-  #workerEnvironment(options: PluginOptions): NodeJS.ProcessEnv {
+  #workerEnvironment(
+    options: PluginOptions,
+    electronRunAsNode: boolean,
+  ): NodeJS.ProcessEnv {
     const keep = [
       "HOME",
       "PATH",
@@ -484,12 +499,76 @@ export class WorkerClient {
       OPENCODE_ACPX_TOKEN: this.#token,
       OPENCODE_ACPX_PARENT_PID: String(process.pid),
       OPENCODE_ACPX_MAX_FRAME_BYTES: String(this.#maxFrameBytes),
+      ...(electronRunAsNode ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
     };
     for (const name of new Set(keep)) {
-      const value = process.env[name];
+      const value =
+        name === "PATH" ? DEFAULT_WORKER_PATH_ENVIRONMENT : process.env[name];
       if (value !== undefined) environment[name] = value;
     }
     return environment;
+  }
+}
+
+export interface WorkerNodeRuntime {
+  command: string;
+  electronRunAsNode: boolean;
+}
+
+export function resolveWorkerNodeRuntime(
+  electronVersion: string | undefined = process.versions.electron,
+  execPath: string = process.execPath,
+  pathValue: string | undefined = process.env.PATH,
+  executableAvailable: (path: string) => boolean = isExecutableAvailable,
+): WorkerNodeRuntime {
+  const electronHelper =
+    electronVersion !== undefined ||
+    /(?:Electron|OpenCode) Helper(?:\.app)?(?:\/|$)/u.test(execPath);
+  if (electronHelper && isAbsolute(execPath) && executableAvailable(execPath)) {
+    return { command: execPath, electronRunAsNode: true };
+  }
+  return {
+    command: resolveNodeCommand(pathValue, executableAvailable),
+    electronRunAsNode: false,
+  };
+}
+
+export function resolveNodeCommand(
+  pathValue: string | undefined = process.env.PATH,
+  executableAvailable: (path: string) => boolean = isExecutableAvailable,
+): string {
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
+      : [""];
+  for (const directory of (pathValue ?? "").split(delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = join(
+        directory,
+        process.platform === "win32" && extname("node") === ""
+          ? `node${extension}`
+          : "node",
+      );
+      if (executableAvailable(candidate)) return candidate;
+    }
+  }
+  for (const candidate of [
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+  ]) {
+    if (executableAvailable(candidate)) return candidate;
+  }
+  return "node";
+}
+
+function isExecutableAvailable(path: string): boolean {
+  if (!isAbsolute(path)) return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 

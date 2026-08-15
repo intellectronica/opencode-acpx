@@ -250,20 +250,43 @@ export class RuntimeHost {
     }
     this.#configuration = normalised;
     this.#configurationFingerprint = fingerprint;
-    await mkdir(normalised.options.stateDir, { recursive: true, mode: 0o700 });
+    try {
+      await mkdir(normalised.options.stateDir, {
+        recursive: true,
+        mode: 0o700,
+      });
+    } catch (error) {
+      throw new RuntimeHostError(
+        "STATE_DIRECTORY_INITIALISE_FAILED",
+        "Unable to initialise the ACP runtime state directory",
+        { causeCode: systemErrorCode(error) },
+      );
+    }
     for (const [serverId, server] of Object.entries(
       normalised.options.servers,
     )) {
       if (!server.enabled) continue;
-      this.#runtimes.set(
-        serverId,
-        await this.#createRuntime(
+      try {
+        this.#runtimes.set(
           serverId,
-          server,
-          normalised.options,
-          normalised.directory,
-        ),
-      );
+          await this.#createRuntime(
+            serverId,
+            server,
+            normalised.options,
+            normalised.directory,
+          ),
+        );
+      } catch (error) {
+        const safeServerId = serverId
+          .toUpperCase()
+          .replaceAll(/[^A-Z0-9_]/g, "_")
+          .slice(0, 48);
+        throw new RuntimeHostError(
+          `RUNTIME_INITIALISE_FAILED_${safeServerId || "SERVER"}`,
+          `Unable to initialise the ${serverId} ACP runtime`,
+          { causeCode: systemErrorCode(error) },
+        );
+      }
       this.#emitRuntimeDiagnostics(serverId);
     }
     this.#startIdleTimer(normalised.options.idleTimeoutMs);
@@ -1440,6 +1463,18 @@ export class RuntimeHost {
     if (this.#disposing)
       throw new RuntimeHostError("WORKER_DISPOSING", "Worker is disposing");
   }
+}
+
+function systemErrorCode(error: unknown): string | undefined {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("code" in error) ||
+    typeof error.code !== "string"
+  ) {
+    return undefined;
+  }
+  return error.code.replaceAll(/[^A-Za-z0-9_]/g, "_").slice(0, 80);
 }
 
 function catalogueSessionKey(serverId: string, cwd: string): string {

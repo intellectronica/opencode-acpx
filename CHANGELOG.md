@@ -23,6 +23,9 @@ plugin contract.
 
 - Keep whitelisted ACP providers visible and their exact model IDs routable
   when a startup catalogue probe is temporarily unavailable.
+- Start workers through Electron's verified Node mode or a resolved absolute
+  Node fallback, retain a stable worker `PATH`, and share identical workers
+  within an OpenCode plugin context so delayed project instances initialise.
 - Keep every effort/fast combination available when an ACP session's sticky
   current selection changes.
 - Handle OpenCode title/summary/compaction agents locally so one user turn does
