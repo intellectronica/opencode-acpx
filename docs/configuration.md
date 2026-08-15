@@ -126,6 +126,79 @@ discovered parameterised IDs such as
 keeps the filter usable across Cursor catalogue refreshes without discarding
 the exact ID that ACP needs for selection.
 
+### Model variants and reasoning effort
+
+The plugin turns model-scoped ACP selectors into ordinary OpenCode variants:
+
+- `thought_level`, `reasoning_effort` and equivalent effort selectors;
+- supported `model_config` controls such as Claude/Codex fast mode;
+- Cursor's parameterised effort and fast selectors.
+
+Every advertised combination has a stable variant name, including the ACP
+session's current combination. Selecting a variant sends the exact model ID and
+all typed values (including Boolean `false`) before the first prompt. Agent
+permission modes, collaboration modes and persona selectors are deliberately
+not presented as thinking variants.
+
+Configured fallbacks can provide the same mapping when an agent cannot expose
+the options during discovery:
+
+```jsonc
+{
+  "models": {
+    "known-model-id": {
+      "name": "Known model",
+      "variants": {
+        "high": {
+          "config": { "reasoning_effort": "high", "fast": false },
+        },
+      },
+    },
+  },
+}
+```
+
+### ACP stdio over SSH
+
+An ACP agent may run on another machine by configuring `ssh` as the stdio
+command. The remote command must emit ACP NDJSON on stdout and logs on stderr:
+
+```jsonc
+{
+  "preset": "hermes",
+  "command": "/usr/bin/ssh",
+  "args": [
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+    "mac-mini",
+    "PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\" exec hermes acp",
+  ],
+  "cwd": "/Users/eleanor",
+  "authProfile": "fnord-mac-mini",
+}
+```
+
+Use key-based SSH authentication and a verified host key. `BatchMode=yes`
+prevents a password prompt from corrupting the protocol stream. The configured
+absolute `cwd` is sent to the remote ACP agent and must exist there; the current
+session identity implementation also requires the same path to resolve on the
+OpenCode host.
+
 ### MCP servers
 
 Stdio:

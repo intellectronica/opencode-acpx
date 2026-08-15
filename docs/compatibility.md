@@ -15,7 +15,7 @@ default.
 | Agent thought                             | Reasoning                                                                 |
 | Agent-native tool                         | Provider-executed native OpenCode card where recognised; generic fallback |
 | Subagent activity                         | Native OpenCode task card where standard/vendor metadata permits          |
-| Plan                                      | ACP update retained on the private worker event channel                   |
+| Plan/todo                                 | Native OpenCode todo state through a correlated `todowrite` continuation  |
 | Permission request                        | Reserved plugin tool and OpenCode permission UI                           |
 | Form or URL elicitation                   | Question/control tool when representable; otherwise cancel                |
 | Available command                         | Startup OpenCode command snapshot                                         |
@@ -26,6 +26,11 @@ default.
 ACP v1 has no global model or skill catalogue. Discovery is session-scoped and
 dynamic. Catalogue entries are therefore per-instance snapshots;
 re-authentication or an agent update may require an OpenCode reload.
+
+Thought-level and allowlisted model-config selectors are probed per model and
+published as OpenCode variants. Every selected variant is applied before the
+prompt, with exact string/Boolean values. Modes that change permissions,
+sandboxing or workflow remain separate session controls.
 
 ## Presets
 
@@ -91,6 +96,8 @@ re-authentication or an agent update may require an OpenCode reload.
   feature-compatible releases.
 - Uses legacy session models and `session/set_model`; IDs are opaque and may
   contain several colons.
+- Hermes currently advertises no generic thought-level/model-config axis, so
+  its provider-qualified models are populated but have no invented variants.
 - Modes: `default`, `accept_edits`, `dont_ask` when advertised.
 - Native tools, memory and skills remain active, but installed skills are not
   individually advertised as ACP commands in Hermes 0.20.1.
@@ -112,3 +119,6 @@ re-authentication or an agent update may require an OpenCode reload.
 - Rewind/fork creates a fresh ACP generation when the agent has no tested fork
   capability.
 - Remote tool output is a UI projection, not a lossless audit trail.
+- OpenCode's public plugin API has no direct todo-state mutation method. Native
+  todo display therefore uses one host `todowrite` continuation for each
+  changed structured snapshot; identical snapshots are de-duplicated.

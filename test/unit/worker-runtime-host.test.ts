@@ -4,6 +4,7 @@ import type { AcpRuntime, AcpRuntimeHandle } from "acpx/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { parsePluginOptions } from "../../src/config.js";
+import type { RuntimeWorkerEvent } from "../../src/worker/messages.js";
 import {
   RuntimeHost,
   STOCK_ACPX_FEATURE_SUPPORT,
@@ -29,6 +30,7 @@ function configuration() {
 
 function fakeRuntime() {
   const handles = new Map<string, AcpRuntimeHandle>();
+  const operations: string[] = [];
   const ensureSession = vi.fn(
     ({ sessionKey, cwd }: { sessionKey: string; cwd?: string }) => {
       const handle: AcpRuntimeHandle = {
@@ -46,6 +48,12 @@ function fakeRuntime() {
     handles.delete(handle.sessionKey);
     return Promise.resolve();
   });
+  const setConfigOption = vi.fn(
+    ({ key, value }: { key: string; value: string | boolean }) => {
+      operations.push(`config:${key}:${String(value)}`);
+      return Promise.resolve();
+    },
+  );
   const runtime = {
     ensureSession,
     close,
@@ -70,8 +78,9 @@ function fakeRuntime() {
         },
       }),
     ),
+    setConfigOption,
   } as unknown as AcpRuntime;
-  return { runtime, ensureSession, close };
+  return { runtime, ensureSession, close, setConfigOption, operations };
 }
 
 describe("RuntimeHost", () => {
@@ -288,6 +297,65 @@ describe("RuntimeHost", () => {
         expect.objectContaining({ type: "turn.result", turnId: "turn-1" }),
       ),
     );
+    await host.dispose();
+  });
+
+  it("applies exact model and typed config selections before prompting", async () => {
+    const fake = fakeRuntime();
+    fake.runtime.startTurn = vi.fn(({ requestId }: { requestId: string }) => {
+      fake.operations.push(`prompt:${requestId}`);
+      return {
+        requestId,
+        events: {
+          async *[Symbol.asyncIterator]() {
+            await Promise.resolve();
+            yield* [];
+          },
+        },
+        result: Promise.resolve({
+          status: "completed" as const,
+          stopReason: "end_turn",
+        }),
+        cancel: () => Promise.resolve(),
+        closeStream: () => Promise.resolve(),
+      };
+    });
+    const events: RuntimeWorkerEvent[] = [];
+    const host = new RuntimeHost({
+      emit: (event) => events.push(event),
+      runtimeFactory: () => fake.runtime,
+    });
+    await host.configure(configuration());
+
+    await host.startTurn({
+      turnId: "variant-turn",
+      serverId: "cursor",
+      sessionKey: "variant-session",
+      cwd: process.cwd(),
+      requestId: "variant-request",
+      text: "Think carefully",
+      modelId: "smart",
+      config: { effort: "high", fast: false },
+    });
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "turn.result",
+          turnId: "variant-turn",
+        }),
+      ),
+    );
+
+    expect(fake.operations).toEqual([
+      "config:model:smart",
+      "config:effort:high",
+      "config:fast:false",
+      "prompt:variant-request",
+    ]);
+    expect(fake.setConfigOption.mock.calls[2]?.[0]).toMatchObject({
+      key: "fast",
+      value: false,
+    });
     await host.dispose();
   });
 });

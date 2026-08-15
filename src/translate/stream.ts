@@ -20,13 +20,19 @@ import type {
   ExtensionNotificationEvent,
   ExtensionInteraction,
   PermissionInteraction,
+  SessionUpdateEvent,
 } from "../worker/messages.js";
 import {
   jsonValue,
+  mergeTodoProjection,
+  normaliseTodoItems,
+  projectPlanUpdate,
   projectSubagentNotification,
+  projectTodoNotification,
   projectToolCall,
   projectToolResult,
   type ToolProjection,
+  type TodoItem,
 } from "./tools.js";
 
 interface OpenBlock {
@@ -55,6 +61,7 @@ export interface InteractionProjection {
   parts: LanguageModelV3StreamPart[];
   toolCallId: string;
   owner: "provider" | "server";
+  todos?: TodoItem[];
 }
 
 const terminalToolStatuses = new Set([
@@ -71,6 +78,25 @@ function safeStringify(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUninformativeToolStatus(event: ToolEvent): boolean {
+  const title = event.title?.trim().toLowerCase();
+  const text = event.text.trim().toLowerCase();
+  const rawInputEmpty =
+    event.rawInput === undefined ||
+    (isRecord(event.rawInput) && Object.keys(event.rawInput).length === 0);
+  const contentEmpty =
+    event.content === undefined ||
+    (Array.isArray(event.content) && event.content.length === 0);
+  return (
+    (event.kind === undefined || event.kind === "other") &&
+    title === "tool call" &&
+    /^tool call(?: \((?:pending|in_progress|completed)\))?$/u.test(text) &&
+    rawInputEmpty &&
+    event.rawOutput === undefined &&
+    contentEmpty
+  );
 }
 
 function shortHeader(value: string): string {
@@ -244,6 +270,7 @@ export class AcpStreamTranslator {
   readonly #tools = new Map<string, ToolState>();
   #open: OpenBlock | undefined;
   #blockSequence = 0;
+  readonly #suppressedTools = new Set<string>();
   #usage: AcpRuntimeUsageBreakdown | undefined;
 
   constructor(turnId: string, usage?: AcpRuntimeUsageBreakdown) {
@@ -271,6 +298,27 @@ export class AcpStreamTranslator {
       ];
     }
     return [];
+  }
+
+  todoEvent(
+    event: AcpRuntimeEvent,
+    index: number,
+    current: readonly TodoItem[],
+    sourceToken: string,
+  ): InteractionProjection | undefined {
+    if (event.type !== "tool_call") return undefined;
+    const projection = projectToolCall(event);
+    if (projection.name !== "todowrite") return undefined;
+    const id = `${this.#turnId}-tool-${event.toolCallId ?? String(index)}`;
+    this.#suppressedTools.add(id);
+    const todos = normaliseTodoItems(projection.input.todos);
+    if (todos === undefined) return undefined;
+    const merged = mergeTodoProjection(current, {
+      todos,
+      merge: false,
+      ...(event.toolCallId === undefined ? {} : { identity: event.toolCallId }),
+    });
+    return this.#todoProjection(merged, sourceToken);
   }
 
   permission(event: PermissionInteraction): LanguageModelV3StreamPart[] {
@@ -413,6 +461,32 @@ export class AcpStreamTranslator {
     return parts;
   }
 
+  todoSessionUpdate(
+    event: SessionUpdateEvent,
+    current: readonly TodoItem[],
+    sourceToken: string,
+  ): InteractionProjection | undefined {
+    const projection = projectPlanUpdate(event.notification);
+    if (projection === undefined) return undefined;
+    return this.#todoProjection(
+      mergeTodoProjection(current, projection),
+      sourceToken,
+    );
+  }
+
+  todoExtension(
+    event: ExtensionNotificationEvent | ExtensionInteraction,
+    current: readonly TodoItem[],
+    sourceToken: string,
+  ): InteractionProjection | undefined {
+    const projection = projectTodoNotification(event.method, event.params);
+    if (projection === undefined) return undefined;
+    return this.#todoProjection(
+      mergeTodoProjection(current, projection),
+      sourceToken,
+    );
+  }
+
   terminal(result: AcpRuntimeTurnResult): LanguageModelV3StreamPart[] {
     const parts = [...this.#flushDeferredTools(), ...this.#closeBlock()];
     if (result.status === "failed")
@@ -452,7 +526,16 @@ export class AcpStreamTranslator {
   #tool(event: ToolEvent, index: number): LanguageModelV3StreamPart[] {
     const id = `${this.#turnId}-tool-${event.toolCallId ?? String(index)}`;
     const parts = this.#closeBlock();
+    if (this.#suppressedTools.has(id)) return parts;
+    if (isUninformativeToolStatus(event)) {
+      this.#suppressedTools.add(id);
+      return parts;
+    }
     const projection = projectToolCall(event);
+    if (projection.name === "todowrite") {
+      this.#suppressedTools.add(id);
+      return parts;
+    }
     const state = this.#tools.get(id) ?? {
       name: projection.name,
       projection,
@@ -590,6 +673,25 @@ export class AcpStreamTranslator {
       },
     );
     return parts;
+  }
+
+  #todoProjection(
+    todos: TodoItem[],
+    sourceToken: string,
+  ): InteractionProjection {
+    const toolCallId = `${this.#turnId}-todo-${Buffer.from(sourceToken, "utf8").toString("base64url")}`;
+    return {
+      toolCallId,
+      owner: "server",
+      todos,
+      parts: this.#ordinaryToolCall(toolCallId, "todowrite", {
+        todos: todos.map(({ content, status, priority }) => ({
+          content,
+          status,
+          priority,
+        })),
+      }),
+    };
   }
 }
 

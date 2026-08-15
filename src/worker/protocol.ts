@@ -52,12 +52,18 @@ export const configureParamsSchema = z
   .strict();
 
 export const catalogueParamsSchema = z
-  .object({ serverId: identifierSchema, cwd: pathSchema })
+  .object({
+    serverId: identifierSchema,
+    cwd: pathSchema,
+    modelIds: z.array(identifierSchema).max(128).optional(),
+  })
   .strict();
 
 const attachmentSchema = z
   .object({ mediaType: z.string().min(1).max(512), data: z.string() })
   .strict();
+
+const configValueSchema = z.union([z.string().max(65_536), z.boolean()]);
 
 export const turnStartParamsSchema = z
   .object({
@@ -68,6 +74,7 @@ export const turnStartParamsSchema = z
     requestId: identifierSchema,
     text: z.string(),
     modelId: identifierSchema.optional(),
+    config: z.record(identifierSchema, configValueSchema).optional(),
     mode: identifierSchema.optional(),
     attachments: z.array(attachmentSchema).max(64).optional(),
   })
@@ -121,7 +128,7 @@ export const sessionSetConfigParamsSchema = z
     serverId: identifierSchema,
     sessionKey: identifierSchema,
     key: identifierSchema,
-    value: z.string().max(65_536),
+    value: configValueSchema,
   })
   .strict();
 
@@ -204,6 +211,7 @@ const catalogueResultSchema = z
     currentModelId: identifierSchema.optional(),
     models: z.array(catalogueModelSchema),
     configOptions: z.array(z.unknown()),
+    modelConfigOptions: z.record(z.string(), z.array(z.unknown())),
     availableCommands: z.array(availableCommandSchema),
     runtimeCapabilities: runtimeCapabilitiesSchema,
     featureSupport: capabilityReportSchema,

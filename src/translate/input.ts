@@ -4,6 +4,8 @@ import type {
 } from "@ai-sdk/provider";
 import type { AcpPermissionDecision } from "acpx/runtime";
 
+import type { AcpConfigValue, AcpModelSelection } from "../model-variants.js";
+
 import {
   INTERACTION_TOOL_NAME,
   PERMISSION_TOOL_NAME,
@@ -21,6 +23,8 @@ export interface AcpxCallRouting {
   generation: number;
   mode?: string;
   agent?: string;
+  selection: AcpModelSelection;
+  variantId: string | null;
 }
 
 export interface AcpxPrompt {
@@ -70,6 +74,7 @@ export function readCallRouting(
   ) {
     throw new Error("ACP provider option agent must be a non-empty string");
   }
+  const selection = readModelSelection(routed.opencodeAcpx);
   return {
     openCodeSessionId: requiredString(
       routed.openCodeSessionId,
@@ -79,6 +84,54 @@ export function readCallRouting(
     generation: generation as number,
     ...(mode === undefined ? {} : { mode }),
     ...(agent === undefined ? {} : { agent }),
+    selection: selection.selection,
+    variantId: selection.variantId,
+  };
+}
+
+function readModelSelection(value: unknown): {
+  selection: AcpModelSelection;
+  variantId: string | null;
+} {
+  if (!isObject(value) || value.schema !== 1) {
+    throw new Error("Missing or unsupported ACP model-selection route");
+  }
+  const variantId = value.variantId;
+  if (
+    variantId !== null &&
+    (typeof variantId !== "string" || variantId.length === 0)
+  ) {
+    throw new Error("ACP variantId must be null or a non-empty string");
+  }
+  const modelId = value.modelId;
+  if (
+    modelId !== undefined &&
+    (typeof modelId !== "string" || modelId.length === 0)
+  ) {
+    throw new Error("ACP selected modelId must be a non-empty string");
+  }
+  if (!isObject(value.config)) {
+    throw new Error("ACP model-selection config must be an object");
+  }
+  const config: Record<string, AcpConfigValue> = {};
+  for (const [id, configured] of Object.entries(value.config)) {
+    if (id.length === 0 || id.length > 512) {
+      throw new Error("ACP config option IDs must contain 1 to 512 characters");
+    }
+    if (typeof configured !== "string" && typeof configured !== "boolean") {
+      throw new Error(`ACP config option ${id} must be a string or boolean`);
+    }
+    config[id] = configured;
+  }
+  if (Object.keys(config).length > 64) {
+    throw new Error("ACP model selection contains too many config options");
+  }
+  return {
+    selection: {
+      ...(modelId === undefined ? {} : { modelId }),
+      config,
+    },
+    variantId,
   };
 }
 
@@ -113,6 +166,23 @@ export function readLatestUserPrompt(
     text: text.join("\n"),
     ...(attachments.length === 0 ? {} : { attachments }),
   };
+}
+
+export function hasToolResult(
+  prompt: LanguageModelV3Prompt,
+  toolCallId: string,
+  toolName: string,
+): boolean {
+  return prompt.some(
+    (message) =>
+      (message.role === "tool" || message.role === "assistant") &&
+      message.content.some(
+        (part) =>
+          part.type === "tool-result" &&
+          part.toolCallId === toolCallId &&
+          part.toolName === toolName,
+      ),
+  );
 }
 
 const permissionOutcomes = new Set<AcpPermissionDecision["outcome"]>([

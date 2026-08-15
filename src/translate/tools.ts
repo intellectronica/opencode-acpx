@@ -41,6 +41,19 @@ export interface SubagentProjection {
   isError?: boolean;
 }
 
+export interface TodoProjection {
+  todos: TodoItem[];
+  identity?: string;
+  merge: boolean;
+}
+
+export interface TodoItem {
+  content: string;
+  status: string;
+  priority: string;
+  sourceId?: string;
+}
+
 export function jsonValue(value: unknown): JSONValue {
   if (value === null || typeof value === "string" || typeof value === "boolean")
     return value;
@@ -157,13 +170,84 @@ export function projectSubagentNotification(
   return undefined;
 }
 
+export function projectTodoNotification(
+  method: string,
+  params: unknown,
+): TodoProjection | undefined {
+  if (method !== "cursor/update_todos" || !isRecord(params)) return undefined;
+  const source = isRecord(params.update) ? params.update : params;
+  const todos = todoItems(source.todos);
+  if (todos === undefined) return undefined;
+  const identity = firstString(source, ["toolCallId", "planId", "id"]);
+  return {
+    todos,
+    merge: source.merge === true || params.merge === true,
+    ...(identity === undefined ? {} : { identity }),
+  };
+}
+
+export function projectPlanUpdate(
+  notification: unknown,
+): TodoProjection | undefined {
+  if (!isRecord(notification) || !isRecord(notification.update))
+    return undefined;
+  const update = notification.update;
+  const tag = firstString(update, ["sessionUpdate", "session_update"]);
+  if (tag === "plan") {
+    const todos = todoItems(update.entries);
+    return todos === undefined
+      ? undefined
+      : { todos, identity: "plan", merge: false };
+  }
+  if (tag === "plan_removed") {
+    return undefined;
+  }
+  if (tag !== "plan_update" || !isRecord(update.plan)) return undefined;
+  const plan = update.plan;
+  if (plan.type !== "items") return undefined;
+  const todos = todoItems(plan.entries);
+  return todos === undefined
+    ? undefined
+    : {
+        todos,
+        identity: firstString(plan, ["planId", "plan_id"]) ?? "plan",
+        merge: false,
+      };
+}
+
+export function mergeTodoProjection(
+  current: readonly TodoItem[],
+  projection: TodoProjection,
+): TodoItem[] {
+  const result = projection.merge ? [...current] : [];
+  for (const todo of projection.todos) {
+    const index = result.findIndex((candidate) =>
+      todo.sourceId === undefined
+        ? candidate.content === todo.content
+        : candidate.sourceId === todo.sourceId,
+    );
+    if (index === -1) result.push(todo);
+    else result[index] = todo;
+  }
+  return result.slice(0, 200);
+}
+
+export function normaliseTodoItems(value: unknown): TodoItem[] | undefined {
+  return todoItems(value);
+}
+
 function specialisedTool(
   raw: Record<string, unknown>,
   event: ToolEvent,
 ): ToolProjection | undefined {
   const nativeName = firstString(raw, ["_toolName", "toolName", "tool_name"]);
   const lowered = nativeName?.toLowerCase();
-  if (lowered === "updatetodos" || lowered === "todowrite") {
+  const summary = firstString(raw, ["summary", "description"]) ?? event.text;
+  if (
+    lowered === "updatetodos" ||
+    lowered === "todowrite" ||
+    (event.kind === "other" && looksLikeTodoActivity(summary))
+  ) {
     return {
       name: "todowrite",
       presentation: "todowrite",
@@ -178,6 +262,75 @@ function specialisedTool(
     };
   }
   return undefined;
+}
+
+function looksLikeTodoActivity(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalised = value
+    .replaceAll(/[*_`#]/g, "")
+    .replaceAll(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return (
+    normalised === "todo" ||
+    normalised.startsWith("todo (") ||
+    normalised.startsWith("todo list") ||
+    normalised.startsWith("updating todo") ||
+    normalised.includes(": todo list")
+  );
+}
+
+function todoItems(value: unknown): TodoItem[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const todos: TodoItem[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) return undefined;
+    const content = firstString(item, [
+      "content",
+      "title",
+      "text",
+      "description",
+    ]);
+    if (content === undefined) return undefined;
+    const sourceId = firstString(item, ["id", "todoId", "todo_id"])?.slice(
+      0,
+      256,
+    );
+    todos.push({
+      content: content.slice(0, 512),
+      status: normaliseTodoStatus(
+        firstString(item, ["status", "state"]),
+        isRecord(item._meta) && item._meta.cancelled === true,
+      ),
+      priority: normaliseTodoPriority(firstString(item, ["priority"])),
+      ...(sourceId === undefined ? {} : { sourceId }),
+    });
+  }
+  return todos;
+}
+
+function normaliseTodoStatus(
+  value: string | undefined,
+  cancelled: boolean,
+): string {
+  if (cancelled) return "cancelled";
+  const status = value?.toLowerCase().replaceAll("-", "_");
+  if (
+    status === "in_progress" ||
+    status === "inprogress" ||
+    status === "active" ||
+    status === "running"
+  )
+    return "in_progress";
+  if (status === "completed" || status === "complete" || status === "done")
+    return "completed";
+  if (status === "cancelled" || status === "canceled") return "cancelled";
+  return "pending";
+}
+
+function normaliseTodoPriority(value: string | undefined): string {
+  const priority = value?.toLowerCase();
+  return priority === "high" || priority === "low" ? priority : "medium";
 }
 
 function searchProjection(

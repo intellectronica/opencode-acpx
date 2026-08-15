@@ -16,7 +16,9 @@ callbacks required for full-fidelity ACP operation.
 - Presets for Cursor Agent, Claude Agent ACP, Codex ACP, Grok Build and Hermes,
   plus arbitrary local ACP v1 stdio agents.
 - Account-scoped model and configuration discovery with a safe `default`
-  fallback.
+  fallback. Model-specific thought level, reasoning effort and supported model
+  config are projected as stable OpenCode variants and applied before the ACP
+  prompt starts.
 - One durable ACP conversation per OpenCode session, server and worktree.
 - Streaming assistant text, thought/reasoning, usage, plans and provider-owned
   tool calls without re-executing those tools in OpenCode. Standard ACP tool
@@ -171,6 +173,13 @@ Dynamic changes remain available inside the agent; refreshing OpenCode's
 server-side catalogue currently requires an OpenCode plugin reload.
 Agent-native skill bodies are not copied or claimed as OpenCode-native skills.
 
+For standard ACP config options, `thought_level` and recognised model-scoped
+`model_config` controls become OpenCode variants. Permission modes, personas
+and workflow controls remain session controls. Cursor's parameterised picker is
+enabled and each variant keeps the exact base model plus effort/fast values;
+legacy opaque Cursor IDs are retained unchanged when that is all the agent
+advertises.
+
 ## Architecture
 
 ```text
@@ -228,8 +237,9 @@ See [testing](docs/testing.md) for the complete matrix and release procedure.
 ## Support boundaries
 
 - Stable ACP v1 is the production target. ACP v2 is not enabled.
-- The transport is local stdio. Remote ACP HTTP/WebSocket transports are not
-  exposed by this release.
+- The ACP transport is stdio. The configured command may be an SSH client that
+  carries that stdio stream to a remote agent; direct ACP HTTP/WebSocket
+  transports are not exposed by this release.
 - Agent features that are neither in ACP nor a known vendor extension remain
   internal to that agent.
 - OpenCode-native tools are not injected into the ACP agent as MCP tools.

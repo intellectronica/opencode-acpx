@@ -1,5 +1,5 @@
 diff --git a/dist/live-checkpoint-CBecfnSH.js b/dist/live-checkpoint-CBecfnSH.js
-index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac186db62f97 100644
+index 32fd9b038f9427d9be1f8c045596a9852c256065..692c11dab7bed02666165f4d2d5057edddf6daea 100644
 --- a/dist/live-checkpoint-CBecfnSH.js
 +++ b/dist/live-checkpoint-CBecfnSH.js
 @@ -1667,7 +1667,8 @@ const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
@@ -12,17 +12,28 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  ]);
  function isRecord(value) {
  	return !!value && typeof value === "object" && !Array.isArray(value);
-@@ -3914,7 +3915,8 @@ function resolveClientCapabilities(params) {
+@@ -3914,12 +3915,18 @@ function resolveClientCapabilities(params) {
  			readTextFile: params.fs,
  			writeTextFile: params.fs
  		},
 -		terminal: params.terminal
 +		terminal: params.terminal,
-+		...params.elicitation ? { elicitation: { form: {}, url: {} } } : {}
++		session: { configOptions: { boolean: true } },
++		...params.elicitation ? { elicitation: { form: {}, url: {} } } : {},
++		_meta: { parameterizedModelPicker: true }
  	};
  	if (!params.devinAcp) return baseCapabilities;
  	return {
-@@ -4235,7 +4237,20 @@ var AcpClient = class {
+ 		...baseCapabilities,
+-		_meta: DEVIN_COMPATIBILITY_CLIENT_CAPABILITIES_META
++		_meta: {
++			...baseCapabilities._meta,
++			...DEVIN_COMPATIBILITY_CLIENT_CAPABILITIES_META
++		}
+ 	};
+ }
+ function isDevinRequestDiagnosticsMethod(method) {
+@@ -4235,7 +4242,20 @@ var AcpClient = class {
  			requestPermission: async (params) => {
  				return this.handlePermissionRequest(params);
  			},
@@ -44,7 +55,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  				if (launch.devinAcp && isDevinRequestDiagnosticsMethod(method)) return {};
  				const error = RequestError.methodNotFound(method);
  				if (!this.options.suppressSdkConsoleErrors) console.error(error.message);
-@@ -4262,9 +4277,16 @@ var AcpClient = class {
+@@ -4262,9 +4282,16 @@ var AcpClient = class {
  			releaseTerminal: async (params) => {
  				return this.handleReleaseTerminal(params);
  			},
@@ -62,7 +73,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  	async initializeAgentConnection(params) {
  		try {
  			const initResult = await Promise.race([this.initializeProtocolConnection(params.connection, params.launch), params.startupFailure.promise]);
-@@ -4283,12 +4305,15 @@ var AcpClient = class {
+@@ -4283,12 +4310,15 @@ var AcpClient = class {
  			clientCapabilities: resolveClientCapabilities({
  				devinAcp: launch.devinAcp,
  				fs: this.options.fs !== false,
@@ -80,7 +91,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  		return initialized;
  	}
  	async handleInitializeFailure(params, error) {
-@@ -4306,6 +4331,10 @@ var AcpClient = class {
+@@ -4306,6 +4336,10 @@ var AcpClient = class {
  	createTappedStream(base) {
  		const onAcpMessage = () => this.eventHandlers.onAcpMessage;
  		const onAcpOutputMessage = () => this.eventHandlers.onAcpOutputMessage;
@@ -91,7 +102,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  		const shouldSuppressInboundReplaySessionUpdate = (message) => {
  			return this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message);
  		};
-@@ -4317,6 +4346,11 @@ var AcpClient = class {
+@@ -4317,6 +4351,11 @@ var AcpClient = class {
  						const { value, done } = await reader.read();
  						if (done) break;
  						if (!value) continue;
@@ -103,7 +114,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  						if (!shouldSuppressInboundReplaySessionUpdate(value)) {
  							onAcpOutputMessage()?.("inbound", value);
  							onAcpMessage()?.("inbound", value);
-@@ -4331,6 +4365,11 @@ var AcpClient = class {
+@@ -4331,6 +4370,11 @@ var AcpClient = class {
  			writable: new WritableStream({ async write(message) {
  				onAcpOutputMessage()?.("outbound", message);
  				onAcpMessage()?.("outbound", message);
@@ -115,7 +126,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  				const writer = base.writable.getWriter();
  				try {
  					await writer.write(message);
-@@ -4799,8 +4838,38 @@ var AcpClient = class {
+@@ -4799,8 +4843,38 @@ var AcpClient = class {
  			this.log(`agent advertised auth methods [${methods.map((m) => m.id).join(", ")}] but no matching credentials found — skipping (agent may handle auth internally)`);
  			return;
  		}
@@ -156,7 +167,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  	}
  	async handlePermissionRequest(params) {
  		if (this.cancellingSessionIds.has(params.sessionId)) return cancelledPermissionResponse();
-@@ -4999,6 +5068,12 @@ var AcpClient = class {
+@@ -4999,6 +5073,12 @@ var AcpClient = class {
  	async handleSessionUpdate(notification) {
  		const sequence = ++this.observedSessionUpdates;
  		this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
@@ -170,7 +181,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..fc552cf174aef4af37b2fdb0e29eac18
  				if (!this.suppressSessionUpdates) this.eventHandlers.onSessionUpdate?.(notification);
  			} catch (error) {
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4fea8ea27 100644
+index 0a8e55a11354137781078a1cf8ff043c0466b06f..e8307baec5a8f7425b03affd86c83cf6dc267711 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
 @@ -1,7 +1,7 @@
@@ -200,6 +211,15 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4
  type AcpRuntimeHandle = {
    sessionKey: string;
    backend: string;
+@@ -238,7 +249,7 @@ interface AcpRuntime {
+   setConfigOption?(input: {
+     handle: AcpRuntimeHandle;
+     key: string;
+-    value: string;
++    value: string | boolean;
+   }): Promise<void>;
+   doctor?(): Promise<AcpRuntimeDoctorReport>;
+   cancel(input: {
 @@ -273,6 +284,13 @@ type AcpRuntimeOptions = {
    onPermissionRequest?: (req: AcpPermissionRequest, ctx: {
      signal: AbortSignal;
@@ -214,6 +234,15 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4
  };
  type AcpFileSessionStoreOptions = {
    stateDir: string;
+@@ -349,7 +367,7 @@ declare class AcpRuntimeManager {
+   }): AsyncIterable<AcpRuntimeEvent>;
+   getStatus(handle: AcpRuntimeHandle): Promise<AcpRuntimeStatus>;
+   setMode(handle: AcpRuntimeHandle, mode: string, sessionMode?: "persistent" | "oneshot"): Promise<void>;
+-  setConfigOption(handle: AcpRuntimeHandle, key: string, value: string, sessionMode?: "persistent" | "oneshot"): Promise<void>;
++  setConfigOption(handle: AcpRuntimeHandle, key: string, value: string | boolean, sessionMode?: "persistent" | "oneshot"): Promise<void>;
+   cancel(handle: AcpRuntimeHandle): Promise<void>;
+   close(handle: AcpRuntimeHandle, options?: {
+     discardPersistentState?: boolean;
 @@ -390,6 +408,7 @@ declare function decodeAcpxRuntimeHandleState(runtimeSessionName: string): AcpxH
  //#endregion
  //#region src/runtime.d.ts
@@ -222,6 +251,15 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4
  type AcpxRuntimeLike = AcpRuntime & {
    probeAvailability(): Promise<void>;
    isHealthy(): boolean;
+@@ -444,7 +463,7 @@ declare class AcpxRuntime implements AcpxRuntimeLike {
+   setConfigOption(input: {
+     handle: AcpRuntimeHandle;
+     key: string;
+-    value: string;
++    value: string | boolean;
+   }): Promise<void>;
+   cancel(input: {
+     handle: AcpRuntimeHandle;
 @@ -465,5 +484,5 @@ declare function createRuntimeStore(options: {
    stateDir: string;
  }): AcpSessionStore;
@@ -229,9 +267,8 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..ea7d5ce091fd12f90c80dea71e4b6ce4
 -export { ACPX_BACKEND_ID, type AcpAgentRegistry, type AcpFileSessionStoreOptions, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeAvailableCommand, type AcpRuntimeCapabilities, type AcpRuntimeDoctorReport, type AcpRuntimeEnsureInput, AcpRuntimeError, type AcpRuntimeErrorCode, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeOptions, type AcpRuntimePromptMode, type AcpRuntimeSessionMode, type AcpRuntimeSessionModels, type AcpRuntimeSessionUsage, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpRuntimeTurnAttachment, type AcpRuntimeTurnInput, type AcpRuntimeTurnResult, type AcpRuntimeTurnResultError, type AcpRuntimeUsageBreakdown, type AcpRuntimeUsageCost, type AcpSessionRecord, type AcpSessionStore, type AcpSessionUpdateTag, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, type RequestedModelUnsupportedErrorCode, type RequestedModelUnsupportedReason, type SessionAgentOptions, type SystemPromptOption, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
 +export { ACPX_BACKEND_ID, ACPX_RUNTIME_COMPAT_HOOKS_VERSION, type AcpAgentRegistry, type AcpFileSessionStoreOptions, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeAuthMetadata, type AcpRuntimeAvailableCommand, type AcpRuntimeCapabilities, type AcpRuntimeDoctorReport, type AcpRuntimeEnsureInput, AcpRuntimeError, type AcpRuntimeErrorCode, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeOptions, type AcpRuntimePromptMode, type AcpRuntimeRawMessageDirection, type AcpRuntimeRequestContext, type AcpRuntimeSessionMode, type AcpRuntimeSessionModels, type AcpRuntimeSessionUsage, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpRuntimeTurnAttachment, type AcpRuntimeTurnInput, type AcpRuntimeTurnResult, type AcpRuntimeTurnResultError, type AcpRuntimeUsageBreakdown, type AcpRuntimeUsageCost, type AcpSessionRecord, type AcpSessionStore, type AcpSessionUpdateTag, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, type RequestedModelUnsupportedErrorCode, type RequestedModelUnsupportedReason, type SessionAgentOptions, type SystemPromptOption, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
  //# sourceMappingURL=runtime.d.ts.map
-\ No newline at end of file
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 3fb25ae4124cea292546e1dda95465b3ae15577e..4ddc949258367676e2a9b829521b12b8ed75cab3 100644
+index 3fb25ae4124cea292546e1dda95465b3ae15577e..9f02f4025c3a634388076f7f4563d59b4a0d9266 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -745,7 +745,17 @@ var AcpRuntimeManager = class {
@@ -253,7 +290,56 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..4ddc949258367676e2a9b829521b12b8
  	}
  	async readPendingPersistentClient(record, options) {
  		const pendingClient = this.pendingPersistentClients.get(record.acpxRecordId);
-@@ -1513,6 +1523,7 @@ function createProbeClient(options, agentCommand, deps) {
+@@ -1285,6 +1295,24 @@ var AcpRuntimeManager = class {
+ 	async setConfigOption(handle, key, value, sessionMode = "persistent") {
+ 		const record = await this.requireRecord(handle.acpxRecordId ?? handle.sessionKey);
+ 		const controller = this.activeControllers.get(record.acpxRecordId);
++		if (key === "model") {
++			if (typeof value !== "string") throw new AcpRuntimeError("ACP_BACKEND_UNSUPPORTED_CONTROL", "ACP model identifiers must be strings.");
++			if (controller) {
++				const response = await controller.setSessionModel(value);
++				applyConfigOptionsToRecord(record, response);
++				setDesiredModelId(record, currentModelIdFromSetModelResponse(response, value), advertisedModelState(record.acpx)?.configId);
++				await this.options.sessionStore.save(record);
++				return;
++			}
++			const result = await this.withRuntimeControlSession(record, sessionMode, async ({ client, sessionId, record: connectedRecord }) => {
++				const models = advertisedModelState(connectedRecord.acpx);
++				const response = await client.setSessionModel(sessionId, value, models);
++				applyConfigOptionsToRecord(connectedRecord, response);
++				setDesiredModelId(connectedRecord, currentModelIdFromSetModelResponse(response, value), models?.configId);
++			});
++			await this.options.sessionStore.save(result.record);
++			return;
++		}
+ 		if (controller) {
+ 			const { configId, response } = await controller.setResolvedSessionConfigOption(key, value);
+ 			applyConfigOptionsToRecord(record, response);
+@@ -1307,11 +1335,18 @@ var AcpRuntimeManager = class {
+ 		if (this.activeControllers.has(record.acpxRecordId)) this.closingActiveRecords.add(record.acpxRecordId);
+ 		await this.cancel(handle);
+ 		if (options.discardPersistentState) {
+-			await this.closeBackendSession(record);
+-			record.acpx = {
+-				...record.acpx,
+-				reset_on_next_ensure: true
+-			};
++			try {
++				await this.closeBackendSession(record);
++			} finally {
++				record.acpx = {
++					...record.acpx,
++					reset_on_next_ensure: true
++				};
++				record.closed = true;
++				record.closedAt = isoNow();
++				await this.options.sessionStore.save(record);
++			}
++			return;
+ 		} else await this.closePendingPersistentClient(record.acpxRecordId);
+ 		record.closed = true;
+ 		record.closedAt = isoNow();
+@@ -1513,6 +1548,7 @@ function createProbeClient(options, agentCommand, deps) {
  //#endregion
  //#region src/runtime.ts
  const ACPX_BACKEND_ID = "acpx";
@@ -261,7 +347,7 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..4ddc949258367676e2a9b829521b12b8
  const ACPX_CAPABILITIES = { controls: [
  	"session/set_mode",
  	"session/set_config_option",
-@@ -1725,6 +1736,6 @@ function createRuntimeStore(options) {
+@@ -1725,6 +1761,6 @@ function createRuntimeStore(options) {
  	return createFileSessionStore(options);
  }
  //#endregion
@@ -269,7 +355,6 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..4ddc949258367676e2a9b829521b12b8
 +export { ACPX_BACKEND_ID, ACPX_RUNTIME_COMPAT_HOOKS_VERSION, AcpRuntimeError, AcpxRuntime, DEFAULT_AGENT_NAME, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, REQUESTED_MODEL_UNSUPPORTED_REASONS, RequestedModelUnsupportedError, createAcpRuntime, createAgentRegistry, createFileSessionStore, createRuntimeStore, decodeAcpxRuntimeHandleState, encodeAcpxRuntimeHandleState, isAcpRuntimeError, isRequestedModelUnsupportedError };
  
  //# sourceMappingURL=runtime.js.map
-\ No newline at end of file
 diff --git a/dist/session-options-CTdZvr68.d.ts b/dist/session-options-CTdZvr68.d.ts
 index 3ec271cc95b43ad598f182652c391d17f28fc695..0ecfcc91db15eff609ef2dd376b7a7cd64f51aad 100644
 --- a/dist/session-options-CTdZvr68.d.ts

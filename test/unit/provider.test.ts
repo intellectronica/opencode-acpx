@@ -98,7 +98,16 @@ function call(
   return {
     prompt: [{ role: "user", content: [{ type: "text", text: "Hello ACP" }] }],
     providerOptions: {
-      [providerId]: { openCodeSessionId: "session-1", requestId: "message-1" },
+      [providerId]: {
+        openCodeSessionId: "session-1",
+        requestId: "message-1",
+        opencodeAcpx: {
+          schema: 1,
+          variantId: null,
+          modelId: "cursor-model",
+          config: {},
+        },
+      },
     },
     ...overrides,
   };
@@ -125,24 +134,33 @@ describe("OpenCode Acpx language provider", () => {
       });
     };
 
-    await readStream((await model.doStream(call(providerId))).stream);
+    await readStream(
+      (
+        await model.doStream(
+          call(providerId, {
+            providerOptions: {
+              [providerId]: {
+                openCodeSessionId: "session-1",
+                requestId: "message-1",
+                opencodeAcpx: {
+                  schema: 1,
+                  variantId: null,
+                  config: {},
+                },
+              },
+            },
+          }),
+        )
+      ).stream,
+    );
 
     expect(client.starts).toHaveLength(1);
     expect(client.starts[0]).not.toHaveProperty("modelId");
   });
 
-  it("isolates and discards OpenCode internal title sessions", async () => {
+  it("handles OpenCode internal title generation without opening an ACP session", async () => {
     const { client, model, providerId } = setup("acp.cursor.title", "default");
-    client.onStart = (params, channel) => {
-      channel.push({
-        type: "turn.result",
-        turnId: params.turnId,
-        index: 0,
-        result: { status: "completed", stopReason: "end_turn" },
-      });
-    };
-
-    await readStream(
+    const parts = await readStream(
       (
         await model.doStream(
           call(providerId, {
@@ -151,6 +169,11 @@ describe("OpenCode Acpx language provider", () => {
                 openCodeSessionId: "session-1",
                 requestId: "title-message-1",
                 agent: "title",
+                opencodeAcpx: {
+                  schema: 1,
+                  variantId: null,
+                  config: {},
+                },
               },
             },
           }),
@@ -158,13 +181,54 @@ describe("OpenCode Acpx language provider", () => {
       ).stream,
     );
 
-    expect(client.closeSession).toHaveBeenCalledOnce();
-    expect(client.closeSession).toHaveBeenCalledWith(
-      "cursor",
-      client.starts[0]?.sessionKey,
-      true,
+    expect(client.starts).toHaveLength(0);
+    expect(client.closeSession).not.toHaveBeenCalled();
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        type: "text-delta",
+        delta: "Hello ACP",
+      }),
     );
   });
+
+  it.each(["summary", "compaction"])(
+    "handles OpenCode internal %s generation without opening an ACP session",
+    async (agent) => {
+      const { client, model, providerId } = setup(
+        `acp.cursor.${agent}`,
+        "default",
+      );
+      const parts = await readStream(
+        (
+          await model.doStream(
+            call(providerId, {
+              providerOptions: {
+                [providerId]: {
+                  openCodeSessionId: "session-1",
+                  requestId: `${agent}-message-1`,
+                  agent,
+                  opencodeAcpx: {
+                    schema: 1,
+                    variantId: null,
+                    config: {},
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      );
+
+      expect(client.starts).toHaveLength(0);
+      expect(parts).toContainEqual(
+        expect.objectContaining({
+          type: "text-delta",
+          delta:
+            "The persistent ACP agent session retains the conversation context.",
+        }),
+      );
+    },
+  );
 
   it("routes dotted providers and replays a stable turn without starting it twice", async () => {
     const { client, model, providerId } = setup();
@@ -612,5 +676,85 @@ describe("OpenCode Acpx language provider", () => {
           part.toolName === "opencode_acp_interaction",
       ),
     ).toBe(false);
+  });
+
+  it("segments ACP plans through native todowrite and resumes the same turn", async () => {
+    const { client, model, providerId } = setup("acp.cursor.todo");
+    client.onStart = (params, channel) => {
+      client.emit({
+        type: "session.update",
+        serverId: "cursor",
+        sessionKey: params.sessionKey,
+        turnId: params.turnId,
+        notification: {
+          sessionId: "backend-session",
+          update: {
+            sessionUpdate: "plan",
+            entries: [
+              {
+                content: "Inspect",
+                status: "in_progress",
+                priority: "high",
+              },
+            ],
+          },
+        },
+      });
+      channel.push({
+        type: "turn.event",
+        turnId: params.turnId,
+        index: 0,
+        event: { type: "text_delta", text: "Done", stream: "output" },
+      });
+      channel.push({
+        type: "turn.result",
+        turnId: params.turnId,
+        index: 1,
+        result: { status: "completed", stopReason: "end_turn" },
+      });
+    };
+
+    const first = await readStream(
+      (await model.doStream(call(providerId))).stream,
+    );
+    const todo = first.find(
+      (part) => part.type === "tool-call" && part.toolName === "todowrite",
+    );
+    if (todo?.type !== "tool-call") throw new Error("missing todo call");
+    expect(todo.providerExecuted).toBe(false);
+    expect(JSON.parse(todo.input)).toEqual({
+      todos: [{ content: "Inspect", status: "in_progress", priority: "high" }],
+    });
+
+    const second = await readStream(
+      (
+        await model.doStream(
+          call(providerId, {
+            prompt: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "Hello ACP" }],
+              },
+              {
+                role: "tool",
+                content: [
+                  {
+                    type: "tool-result",
+                    toolCallId: todo.toolCallId,
+                    toolName: "todowrite",
+                    output: { type: "text", value: "Todo list updated" },
+                  },
+                ],
+              },
+            ],
+          }),
+        )
+      ).stream,
+    );
+
+    expect(client.starts).toHaveLength(1);
+    expect(second).toContainEqual(
+      expect.objectContaining({ type: "text-delta", delta: "Done" }),
+    );
   });
 });

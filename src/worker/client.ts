@@ -225,7 +225,7 @@ export class WorkerClient {
     serverId: string,
     sessionKey: string,
     key: string,
-    value: string,
+    value: string | boolean,
   ): Promise<WorkerMethodResults["session.setConfig"]> {
     return this.request("session.setConfig", {
       serverId,

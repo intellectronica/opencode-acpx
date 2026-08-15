@@ -27,6 +27,12 @@ describe("ACP input translation", () => {
           requestId: "message-1",
           generation: 2,
           mode: "plan",
+          opencodeAcpx: {
+            schema: 1,
+            variantId: "high",
+            modelId: "cursor[effort=high]",
+            config: { effort: "high", fast: false },
+          },
         },
       },
     });
@@ -36,6 +42,11 @@ describe("ACP input translation", () => {
       requestId: "message-1",
       generation: 2,
       mode: "plan",
+      selection: {
+        modelId: "cursor[effort=high]",
+        config: { effort: "high", fast: false },
+      },
+      variantId: "high",
     });
   });
 

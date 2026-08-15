@@ -18,6 +18,7 @@ import { collectGenerateResult } from "./translate/generate.js";
 import {
   readCallRouting,
   hasQuestionResult,
+  hasToolResult,
   readGenericInteractionResponse,
   readLatestUserPrompt,
   readPermissionDecision,
@@ -25,7 +26,9 @@ import {
 } from "./translate/input.js";
 import {
   AcpStreamTranslator,
+  emptyUsage,
   permissionToolCallId,
+  type InteractionProjection,
 } from "./translate/stream.js";
 import type {
   ElicitationInteraction,
@@ -34,6 +37,7 @@ import type {
   RuntimeWorkerEvent,
 } from "./worker/messages.js";
 import type { TurnChannel } from "./worker/turn-channel.js";
+import type { TodoItem } from "./translate/tools.js";
 
 export interface AcpxProviderFactoryOptions {
   name: string;
@@ -61,6 +65,11 @@ interface PendingGenericInteraction {
   response?: Promise<void>;
 }
 
+interface PendingTodoProjection {
+  kind: "todo";
+  toolCallId: string;
+}
+
 interface TurnState {
   turnId: string;
   sessionKey: string;
@@ -68,24 +77,88 @@ interface TurnState {
   channel: Promise<TurnChannel>;
   cursor: number;
   segmentStartCursor: number;
-  pendingInteraction?: PendingPermission | PendingGenericInteraction;
+  pendingInteraction?:
+    | PendingPermission
+    | PendingGenericInteraction
+    | PendingTodoProjection;
   terminal?: AcpRuntimeTurnResult;
   usage: AcpRuntimeUsageBreakdown | undefined;
   lastAccess: number;
   events: RuntimeWorkerEvent[];
   waiters: Set<() => void>;
   failure: Error | undefined;
+  selectionFingerprint: string;
 }
 
 interface RuntimeHub {
   turns: Map<string, TurnState>;
   orphans: Map<string, RuntimeWorkerEvent[]>;
   unsubscribe: () => void;
+  todosBySession: Map<string, TodoItem[]>;
+  todoHashesBySession: Map<string, string>;
 }
 
 const hubsByRuntime = new WeakMap<ProviderRuntime, RuntimeHub>();
 const MAX_REPLAY_TURNS_PER_RUNTIME = 256;
 const INTERNAL_AGENT_NAMES = new Set(["title", "summary", "compaction"]);
+
+function localTitle(call: LanguageModelV3CallOptions): string {
+  const prompt = readLatestUserPrompt(call.prompt)
+    .text.replaceAll(/<[^>]+>/g, " ")
+    .replaceAll(/[`*_#>{}]/g, " ")
+    .replaceAll("[", " ")
+    .replaceAll("]", " ")
+    .replaceAll(/\s+/g, " ")
+    .trim();
+  if (prompt.length === 0) return "ACP session";
+  const words = prompt.split(" ").slice(0, 8).join(" ");
+  const title = words.replaceAll(/[.:,;!?]+$/g, "").trim();
+  return title.length === 0 ? "ACP session" : title.slice(0, 80);
+}
+
+function internalAgentText(
+  agent: string,
+  call: LanguageModelV3CallOptions,
+): string {
+  if (agent === "title") return localTitle(call);
+  return "The persistent ACP agent session retains the conversation context.";
+}
+
+function internalAgentStream(
+  routing: AcpxCallRouting,
+  call: LanguageModelV3CallOptions,
+): LanguageModelV3StreamResult | undefined {
+  const agent = routing.agent;
+  if (agent === undefined || !INTERNAL_AGENT_NAMES.has(agent)) return undefined;
+  const responseId = `opencode-acpx-internal-${digest(
+    routing.openCodeSessionId,
+    routing.requestId,
+    agent,
+  )}`;
+  const text = internalAgentText(agent, call);
+  const textId = `${responseId}-text`;
+  const parts: LanguageModelV3StreamPart[] = [
+    { type: "stream-start", warnings: [] },
+    { type: "response-metadata", id: responseId },
+    { type: "text-start", id: textId },
+    { type: "text-delta", id: textId, delta: text },
+    { type: "text-end", id: textId },
+    {
+      type: "finish",
+      usage: emptyUsage(),
+      finishReason: { unified: "stop", raw: `internal-${agent}` },
+    },
+  ];
+  return {
+    stream: new ReadableStream({
+      start(controller) {
+        for (const part of parts) controller.enqueue(part);
+        controller.close();
+      },
+    }),
+    request: { body: { internalAgent: agent } },
+  };
+}
 
 function requiredFactoryOption(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
@@ -123,13 +196,16 @@ function runtimeHub(runtime: ProviderRuntime): RuntimeHub {
     turns: new Map(),
     orphans: new Map(),
     unsubscribe: () => undefined,
+    todosBySession: new Map(),
+    todoHashesBySession: new Map(),
   };
   hubsByRuntime.set(runtime, hub);
   hub.unsubscribe = runtime.client.subscribe((event) => {
     if (
       (event.type !== "interaction.elicitation" &&
         event.type !== "interaction.extension" &&
-        event.type !== "extension.notification") ||
+        event.type !== "extension.notification" &&
+        event.type !== "session.update") ||
       event.turnId === undefined
     ) {
       return;
@@ -206,7 +282,7 @@ async function ensureLedgerBinding(
   runtime: ProviderRuntime,
   sessionKey: string,
   routing: AcpxCallRouting,
-  modelId: string,
+  selection: AcpxCallRouting["selection"],
 ): Promise<void> {
   if (runtime.ledger === undefined) return;
   const existing = await runtime.ledger.get(sessionKey);
@@ -218,7 +294,8 @@ async function ensureLedgerBinding(
     worktree: runtime.worktree,
     generation: routing.generation,
   });
-  binding.selectedModel = modelId;
+  binding.selectedModel = selection.modelId;
+  binding.selectedConfig = selection.config;
   await runtime.ledger.put(sessionKey, binding);
 }
 
@@ -263,12 +340,21 @@ async function resolveTurn(
   )}`;
   const hub = runtimeHub(runtime);
   const turns = hub.turns;
+  const selectionFingerprint = digest(
+    JSON.stringify(routing.selection),
+    routing.variantId ?? "",
+  );
   const existing = turns.get(turnId);
   if (existing !== undefined) {
+    if (existing.selectionFingerprint !== selectionFingerprint) {
+      throw new Error(
+        "The same OpenCode message cannot be retried with a different ACP model variant",
+      );
+    }
     existing.lastAccess = Date.now();
     return existing;
   }
-  await ensureLedgerBinding(runtime, sessionKey, routing, modelId);
+  await ensureLedgerBinding(runtime, sessionKey, routing, routing.selection);
   pruneReplayTurns(turns);
   const prompt = readLatestUserPrompt(call.prompt);
   const channel = runtime.client.startTurn({
@@ -278,7 +364,10 @@ async function resolveTurn(
     cwd: runtime.server.cwd ?? runtime.directory,
     requestId: routing.requestId,
     text: prompt.text,
-    ...(modelId === "default" ? {} : { modelId }),
+    ...(routing.selection.modelId === undefined
+      ? {}
+      : { modelId: routing.selection.modelId }),
+    config: routing.selection.config,
     ...(routing.mode === undefined ? {} : { mode: routing.mode }),
     ...(prompt.attachments === undefined
       ? {}
@@ -297,6 +386,7 @@ async function resolveTurn(
     events: [],
     waiters: new Set(),
     failure: undefined,
+    selectionFingerprint,
   };
   turns.set(turnId, state);
   for (const event of hub.orphans.get(turnId) ?? [])
@@ -304,6 +394,33 @@ async function resolveTurn(
   hub.orphans.delete(turnId);
   void forwardTurnChannel(state);
   return state;
+}
+
+function acceptTodoSnapshot(
+  runtime: ProviderRuntime,
+  state: TurnState,
+  projection: InteractionProjection,
+): boolean {
+  const todos = projection.todos;
+  if (todos === undefined) return true;
+  const hub = runtimeHub(runtime);
+  const hash = digest(
+    JSON.stringify(
+      todos.map(({ content, status, priority }) => ({
+        content,
+        status,
+        priority,
+      })),
+    ),
+  );
+  if (hub.todoHashesBySession.get(state.sessionKey) === hash) return false;
+  hub.todosBySession.set(state.sessionKey, todos);
+  hub.todoHashesBySession.set(state.sessionKey, hash);
+  return true;
+}
+
+function currentTodos(runtime: ProviderRuntime, state: TurnState): TodoItem[] {
+  return runtimeHub(runtime).todosBySession.get(state.sessionKey) ?? [];
 }
 
 async function continuePermission(
@@ -354,6 +471,19 @@ async function continueGenericInteraction(
             .then(() => undefined);
     await pending.response;
   }
+  state.segmentStartCursor = state.cursor;
+  delete state.pendingInteraction;
+  return true;
+}
+
+function continueTodoProjection(
+  state: TurnState,
+  call: LanguageModelV3CallOptions,
+): boolean {
+  const pending = state.pendingInteraction;
+  if (pending?.kind !== "todo") return false;
+  if (!hasToolResult(call.prompt, pending.toolCallId, "todowrite"))
+    return false;
   state.segmentStartCursor = state.cursor;
   delete state.pendingInteraction;
   return true;
@@ -456,6 +586,23 @@ function streamTurn(
           cursor += 1;
           updateState(state, event, cursor);
           if (event.type === "turn.event") {
+            const todo = translator.todoEvent(
+              event.event,
+              event.index,
+              currentTodos(runtime, state),
+              `event-${String(cursor)}`,
+            );
+            if (todo !== undefined) {
+              if (!acceptTodoSnapshot(runtime, state, todo)) continue;
+              state.pendingInteraction = {
+                kind: "todo",
+                toolCallId: todo.toolCallId,
+              };
+              for (const part of todo.parts) controller.enqueue(part);
+              state.usage = translator.usage;
+              controller.close();
+              return;
+            }
             for (const part of translator.event(event.event, event.index))
               controller.enqueue(part);
             continue;
@@ -481,7 +628,7 @@ function streamTurn(
               event.type === "interaction.extension" &&
               isInformationalCursorExtension(event)
             ) {
-              for (const part of translator.extensionNotification({
+              const notification = {
                 type: "extension.notification",
                 serverId: event.serverId,
                 ...(event.sessionKey === undefined
@@ -490,12 +637,33 @@ function streamTurn(
                 ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
                 method: event.method,
                 params: event.params,
-              }))
-                controller.enqueue(part);
+              } as const;
+              const todo = translator.todoExtension(
+                event,
+                currentTodos(runtime, state),
+                `interaction-${String(cursor)}`,
+              );
+              if (todo === undefined) {
+                for (const part of translator.extensionNotification(
+                  notification,
+                ))
+                  controller.enqueue(part);
+              }
               await runtime.client.respondExtension({
                 interactionId: event.interactionId,
                 result: {},
               });
+              if (todo !== undefined) {
+                if (!acceptTodoSnapshot(runtime, state, todo)) continue;
+                state.pendingInteraction = {
+                  kind: "todo",
+                  toolCallId: todo.toolCallId,
+                };
+                for (const part of todo.parts) controller.enqueue(part);
+                state.usage = translator.usage;
+                controller.close();
+                return;
+              }
               continue;
             }
             const projection = translator.interaction(event);
@@ -514,7 +682,40 @@ function streamTurn(
             controller.close();
             return;
           }
+          if (event.type === "session.update") {
+            const todo = translator.todoSessionUpdate(
+              event,
+              currentTodos(runtime, state),
+              `session-${String(cursor)}`,
+            );
+            if (todo === undefined) continue;
+            if (!acceptTodoSnapshot(runtime, state, todo)) continue;
+            state.pendingInteraction = {
+              kind: "todo",
+              toolCallId: todo.toolCallId,
+            };
+            for (const part of todo.parts) controller.enqueue(part);
+            state.usage = translator.usage;
+            controller.close();
+            return;
+          }
           if (event.type === "extension.notification") {
+            const todo = translator.todoExtension(
+              event,
+              currentTodos(runtime, state),
+              `extension-${String(cursor)}`,
+            );
+            if (todo !== undefined) {
+              if (!acceptTodoSnapshot(runtime, state, todo)) continue;
+              state.pendingInteraction = {
+                kind: "todo",
+                toolCallId: todo.toolCallId,
+              };
+              for (const part of todo.parts) controller.enqueue(part);
+              state.usage = translator.usage;
+              controller.close();
+              return;
+            }
             for (const part of translator.extensionNotification(event))
               controller.enqueue(part);
             continue;
@@ -585,8 +786,10 @@ class AcpxLanguageModel implements LanguageModelV3 {
   async doStream(
     call: LanguageModelV3CallOptions,
   ): Promise<LanguageModelV3StreamResult> {
-    const runtime = runtimeFor(this.#factoryOptions);
     const routing = readCallRouting(call, this.provider);
+    const internal = internalAgentStream(routing, call);
+    if (internal !== undefined) return internal;
+    const runtime = runtimeFor(this.#factoryOptions);
     const state = await resolveTurn(
       runtime,
       this.provider,
@@ -596,6 +799,7 @@ class AcpxLanguageModel implements LanguageModelV3 {
     );
     await continuePermission(runtime, state, call);
     await continueGenericInteraction(runtime, state, call);
+    continueTodoProjection(state, call);
     return streamTurn(runtime, state, call, state.segmentStartCursor);
   }
 

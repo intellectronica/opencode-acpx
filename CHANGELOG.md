@@ -8,6 +8,11 @@ plugin contract.
 
 ### Added
 
+- Stable OpenCode model variants for ACP thought level, reasoning effort,
+  model-scoped configuration and Cursor parameter controls, with exact typed
+  selection before prompting.
+- ACP stdio operation through explicitly configured SSH commands, including
+  remote Hermes model discovery and selection.
 - Native OpenCode shell, read, list, search, edit, write, web, todo and task
   presentation for recognised ACP tool activity, with structured ACP metadata
   retained on fallback cards.
@@ -16,6 +21,12 @@ plugin contract.
 
 ### Fixed
 
+- Keep every effort/fast combination available when an ACP session's sticky
+  current selection changes.
+- Handle OpenCode title/summary/compaction agents locally so one user turn does
+  not create duplicate remote ACP sessions.
+- Suppress summary-only todo and anonymous status cards after native todo
+  projection.
 - Preserve OpenCode provider whitelist/blacklist settings when injecting an ACP
   provider, including base-ID expansion for parameterised Cursor model IDs.
 - Correlate session-less Cursor task notifications by tool-call ID and suppress

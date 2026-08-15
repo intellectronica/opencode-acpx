@@ -2,7 +2,10 @@ import type { AcpRuntimeEvent } from "acpx/runtime";
 import { describe, expect, it } from "vitest";
 
 import {
+  mergeTodoProjection,
+  projectPlanUpdate,
   projectSubagentNotification,
+  projectTodoNotification,
   projectToolCall,
   projectToolResult,
 } from "../../src/translate/tools.js";
@@ -256,5 +259,83 @@ describe("vendor subagent lifecycle projection", () => {
         acpChildSessionId: "child-1",
       },
     });
+  });
+});
+
+describe("native todo projection", () => {
+  it("normalises standard ACP plan entries", () => {
+    expect(
+      projectPlanUpdate({
+        update: {
+          sessionUpdate: "plan",
+          entries: [
+            { content: "Inspect", status: "in_progress", priority: "high" },
+            { content: "Ship", status: "completed" },
+          ],
+        },
+      }),
+    ).toEqual({
+      identity: "plan",
+      merge: false,
+      todos: [
+        { content: "Inspect", status: "in_progress", priority: "high" },
+        { content: "Ship", status: "completed", priority: "medium" },
+      ],
+    });
+  });
+
+  it("merges Cursor todo updates by stable ID and preserves cancellation", () => {
+    const patch = projectTodoNotification("cursor/update_todos", {
+      merge: true,
+      todos: [
+        {
+          id: "two",
+          content: "Ship",
+          status: "completed",
+          _meta: { cancelled: true },
+        },
+        { id: "three", content: "Verify", status: "pending" },
+      ],
+    });
+    expect(patch).toBeDefined();
+    if (patch === undefined) throw new Error("missing todo projection");
+    expect(
+      mergeTodoProjection(
+        [
+          {
+            sourceId: "one",
+            content: "Inspect",
+            status: "completed",
+            priority: "medium",
+          },
+          {
+            sourceId: "two",
+            content: "Ship",
+            status: "pending",
+            priority: "medium",
+          },
+        ],
+        patch,
+      ),
+    ).toEqual([
+      {
+        sourceId: "one",
+        content: "Inspect",
+        status: "completed",
+        priority: "medium",
+      },
+      {
+        sourceId: "two",
+        content: "Ship",
+        status: "cancelled",
+        priority: "medium",
+      },
+      {
+        sourceId: "three",
+        content: "Verify",
+        status: "pending",
+        priority: "medium",
+      },
+    ]);
   });
 });

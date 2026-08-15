@@ -102,7 +102,7 @@ describe("server plugin", () => {
       enabled_providers: ["anthropic"],
       provider: {
         "acp.cursor": {
-          whitelist: ["grok-4.6"],
+          whitelist: ["composer", "grok-4.6"],
           blacklist: ["default"],
           options: { configuredByUser: true },
         },
@@ -121,9 +121,9 @@ describe("server plugin", () => {
       }),
     );
     expect(config.provider?.["acp.cursor"]).toMatchObject({
-      name: "Cursor Agent through ACP",
+      name: "Cursor (ACP)",
       npm: "file:///plugin/provider.js",
-      whitelist: ["grok-4.6[effort=high,fast=true]"],
+      whitelist: ["composer", "grok-4.6"],
       blacklist: ["default"],
       options: {
         configuredByUser: true,
@@ -131,7 +131,7 @@ describe("server plugin", () => {
         serverId: "cursor",
       },
       models: {
-        default: { name: "Cursor Agent default", tool_call: true },
+        default: { name: "Default", tool_call: true },
         composer: { name: "Composer" },
         configured: {
           name: "Configured",
@@ -142,6 +142,14 @@ describe("server plugin", () => {
         },
       },
     });
+    const grokModel = config.provider?.["acp.cursor"]?.models?.["grok-4.6"] as
+      | {
+          variants?: Record<string, { opencodeAcpx?: { modelId?: string } }>;
+        }
+      | undefined;
+    expect(grokModel?.variants?.["high-fast"]?.opencodeAcpx?.modelId).toBe(
+      "grok-4.6[effort=high,fast=true]",
+    );
     expect(config.enabled_providers).toEqual(["anthropic", "acp.cursor"]);
     expect(config.command?.["acp-cursor"]).toEqual({ template: "preserve me" });
     expect(config.command?.["acp-cursor-review"]).toEqual({
@@ -180,11 +188,20 @@ describe("server plugin", () => {
     const chat = {
       sessionID: "oc-session",
       agent: "build",
-      model: { providerID: "acp.cursor" },
+      model: { providerID: "acp.cursor", id: "default" },
       provider: {},
       message: { id: "message-1" },
     };
 
+    await hooks["chat.message"]?.(
+      {
+        sessionID: "oc-session",
+        agent: "build",
+        model: { providerID: "acp.cursor", modelID: "default" },
+        messageID: "message-1",
+      },
+      { message: chat.message as never, parts: [] },
+    );
     await hooks["chat.params"]?.(chat as never, routed);
     await hooks["chat.params"]?.(
       { ...chat, model: { providerID: "anthropic" } } as never,
@@ -212,6 +229,48 @@ describe("server plugin", () => {
     );
     await hooks.dispose?.();
     expect(worker.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("routes the selected OpenCode variant to its exact opaque ACP model ID", async () => {
+    const worker = fakeWorker();
+    const hooks = await createServerPlugin({
+      createWorkerClient: () => worker as unknown as WorkerClient,
+      pluginInstanceId: () => "instance-variant",
+    })(pluginInput(), options());
+    const output = {
+      temperature: 0,
+      topP: 1,
+      topK: 0,
+      maxOutputTokens: undefined,
+      options: {},
+    };
+    await hooks["chat.params"]?.(
+      {
+        sessionID: "variant-session",
+        agent: "build",
+        model: { providerID: "acp.cursor", id: "grok-4.6" },
+        provider: {},
+        message: {
+          id: "variant-message",
+          model: {
+            providerID: "acp.cursor",
+            modelID: "grok-4.6",
+            variant: "high-fast",
+          },
+        },
+      } as never,
+      output,
+    );
+
+    expect(output.options).toMatchObject({
+      opencodeAcpx: {
+        schema: 1,
+        variantId: "high-fast",
+        modelId: "grok-4.6[effort=high,fast=true]",
+        config: {},
+      },
+    });
+    await hooks.dispose?.();
   });
 
   it("logs diagnostic codes without forwarding worker messages or details", async () => {
@@ -257,10 +316,19 @@ describe("server plugin", () => {
     const chat = {
       sessionID: "oc-question-session",
       agent: "build",
-      model: { providerID: "acp.cursor" },
+      model: { providerID: "acp.cursor", id: "default" },
       provider: {},
       message: { id: "message-question" },
     };
+    await hooks["chat.message"]?.(
+      {
+        sessionID: "oc-question-session",
+        agent: "build",
+        model: { providerID: "acp.cursor", modelID: "default" },
+        messageID: "message-question",
+      },
+      { message: chat.message as never, parts: [] },
+    );
     await hooks["chat.params"]?.(chat as never, {
       temperature: 0,
       topP: 1,

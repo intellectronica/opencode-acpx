@@ -24,6 +24,7 @@ import {
   type PluginOptions,
   type ServerConfig,
 } from "../config.js";
+import type { AcpConfigValue } from "../model-variants.js";
 import { DEFAULT_INTERACTION_TIMEOUT_MS } from "../constants.js";
 import { resolveRuntimeCommand } from "../runtime-command.js";
 import { KeyedQueue } from "../session/keyed-queue.js";
@@ -96,6 +97,8 @@ export const PATCHED_ACPX_FEATURE_SUPPORT: WorkerCapabilityReport = {
 interface HandleEntry {
   handle: AcpRuntimeHandle;
   lastUsedAt: number;
+  selectedModelId?: string;
+  selectedConfig: Record<string, AcpConfigValue>;
 }
 
 interface RuntimeEntry {
@@ -286,12 +289,19 @@ export class RuntimeHost {
           const runtimeCapabilities = (await entry.runtime.getCapabilities?.({
             handle: handleEntry.handle,
           })) ?? { controls: [] };
-          return extractCatalogue(
+          const result = extractCatalogue(
             params,
             status,
             runtimeCapabilities,
             this.capabilities,
           );
+          result.modelConfigOptions = await this.#probeModelConfigOptions(
+            entry,
+            handleEntry,
+            result,
+            params.modelIds,
+          );
+          return result;
         } finally {
           await this.#closeCatalogueHandle(entry, sessionKey, handleEntry);
         }
@@ -410,7 +420,7 @@ export class RuntimeHost {
     serverId: string,
     sessionKey: string,
     key: string,
-    value: string,
+    value: AcpConfigValue,
   ): Promise<void> {
     this.#requireConfigured();
     const entry = this.#requireRuntime(serverId);
@@ -424,11 +434,13 @@ export class RuntimeHost {
       );
     }
     await this.#queue.run(this.#queueKey(serverId, sessionKey), async () => {
-      await entry.runtime.setConfigOption?.({
-        handle: handleEntry.handle,
+      await setRuntimeConfigOption(
+        entry.runtime,
+        handleEntry.handle,
         key,
         value,
-      });
+      );
+      handleEntry.selectedConfig[key] = value;
       handleEntry.lastUsedAt = this.#now();
     });
   }
@@ -580,6 +592,7 @@ export class RuntimeHost {
     const { params } = record;
     const entry = this.#requireRuntime(params.serverId);
     const handleEntry = await this.#ensureHandle(entry, params);
+    await this.#applyTurnSelection(entry, handleEntry, params);
     const backendKey =
       handleEntry.handle.backendSessionId === undefined
         ? undefined
@@ -798,7 +811,11 @@ export class RuntimeHost {
       mode: "persistent",
       cwd,
     });
-    const handleEntry = { handle, lastUsedAt: this.#now() };
+    const handleEntry: HandleEntry = {
+      handle,
+      lastUsedAt: this.#now(),
+      selectedConfig: {},
+    };
     entry.handles.set(sessionKey, handleEntry);
     this.#rememberBackendSession(entry.serverId, sessionKey, handle);
     return handleEntry;
@@ -831,6 +848,67 @@ export class RuntimeHost {
     }
   }
 
+  async #probeModelConfigOptions(
+    entry: RuntimeEntry,
+    handleEntry: HandleEntry,
+    catalogue: CatalogueResult,
+    requestedModelIds: string[] | undefined,
+  ): Promise<Record<string, unknown[]>> {
+    const snapshots: Record<string, unknown[]> = {};
+    const modelControl = catalogue.configOptions.some(
+      (option) =>
+        isRecord(option) &&
+        (option.category === "model" || option.id === "model"),
+    );
+    if (
+      !modelControl ||
+      entry.runtime.setConfigOption === undefined ||
+      entry.runtime.getStatus === undefined
+    ) {
+      return snapshots;
+    }
+    const requested = new Set(
+      requestedModelIds ??
+        (catalogue.currentModelId === undefined
+          ? []
+          : [catalogue.currentModelId]),
+    );
+    for (const model of catalogue.models
+      .filter((candidate) => requested.has(candidate.id))
+      .slice(0, 128)) {
+      try {
+        if (model.id !== catalogue.currentModelId) {
+          await setRuntimeConfigOption(
+            entry.runtime,
+            handleEntry.handle,
+            "model",
+            model.id,
+          );
+        }
+        const status = await entry.runtime.getStatus({
+          handle: handleEntry.handle,
+        });
+        const details = isRecord(status.details) ? status.details : undefined;
+        if (Array.isArray(details?.configOptions)) {
+          snapshots[model.id] = structuredClone(details.configOptions);
+        }
+      } catch (error) {
+        this.#emitDiagnostic({
+          level: "warning",
+          code: "ACP_MODEL_VARIANT_PROBE_FAILED",
+          message: `Unable to discover model-specific ACP options for ${model.id}`,
+          serverId: entry.serverId,
+          details: {
+            modelId: model.id,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        });
+        continue;
+      }
+    }
+    return snapshots;
+  }
+
   async #ensureHandle(
     entry: RuntimeEntry,
     params: TurnStartParams,
@@ -855,19 +933,69 @@ export class RuntimeHost {
         ...this.#systemPromptOptions(entry.server),
       },
     });
-    const handleEntry = { handle, lastUsedAt: this.#now() };
+    const status = await entry.runtime.getStatus?.({ handle });
+    const handleEntry: HandleEntry = {
+      handle,
+      lastUsedAt: this.#now(),
+      ...(status?.models?.currentModelId === undefined
+        ? {}
+        : { selectedModelId: status.models.currentModelId }),
+      selectedConfig: currentConfigValues(status),
+    };
     entry.handles.set(params.sessionKey, handleEntry);
     this.#rememberBackendSession(entry.serverId, params.sessionKey, handle);
     if (entry.server.mode !== undefined)
       await entry.runtime.setMode?.({ handle, mode: entry.server.mode });
     for (const [key, value] of Object.entries(entry.server.config)) {
-      await entry.runtime.setConfigOption?.({
-        handle,
-        key,
-        value: String(value),
-      });
+      await setRuntimeConfigOption(entry.runtime, handle, key, value);
+      handleEntry.selectedConfig[key] = value;
     }
     return handleEntry;
+  }
+
+  async #applyTurnSelection(
+    entry: RuntimeEntry,
+    handleEntry: HandleEntry,
+    params: TurnStartParams,
+  ): Promise<void> {
+    if (
+      params.modelId !== undefined &&
+      params.modelId !== handleEntry.selectedModelId
+    ) {
+      if (!entry.runtime.setConfigOption) {
+        throw new RuntimeHostError(
+          "MODEL_SELECTION_UNSUPPORTED",
+          "The ACP runtime cannot change the selected model",
+        );
+      }
+      await setRuntimeConfigOption(
+        entry.runtime,
+        handleEntry.handle,
+        "model",
+        params.modelId,
+      );
+      handleEntry.selectedModelId = params.modelId;
+      handleEntry.selectedConfig = {};
+    }
+    for (const key of Object.keys(params.config ?? {}).sort()) {
+      const value = params.config?.[key];
+      if (value === undefined || handleEntry.selectedConfig[key] === value)
+        continue;
+      if (!entry.runtime.setConfigOption) {
+        throw new RuntimeHostError(
+          "MODEL_CONFIG_UNSUPPORTED",
+          `The ACP runtime cannot set model option ${key}`,
+        );
+      }
+      await setRuntimeConfigOption(
+        entry.runtime,
+        handleEntry.handle,
+        key,
+        value,
+      );
+      handleEntry.selectedConfig[key] = value;
+    }
+    handleEntry.lastUsedAt = this.#now();
   }
 
   #sessionEnvironment(server: ServerConfig): Record<string, string> {
@@ -1319,7 +1447,7 @@ function catalogueSessionKey(serverId: string, cwd: string): string {
     .update(resolve(cwd))
     .digest("hex")
     .slice(0, 24);
-  return `catalogue:${serverId}:${suffix}`;
+  return `catalogue-v3:${serverId}:${suffix}`;
 }
 
 function isUnsupportedBackendClose(error: unknown): boolean {
@@ -1329,6 +1457,41 @@ function isUnsupportedBackendClose(error: unknown): boolean {
     "code" in error &&
     error.code === "ACP_BACKEND_UNSUPPORTED_CONTROL"
   );
+}
+
+function currentConfigValues(
+  status: AcpRuntimeStatus | undefined,
+): Record<string, AcpConfigValue> {
+  const details = isRecord(status?.details) ? status.details : undefined;
+  const options = Array.isArray(details?.configOptions)
+    ? details.configOptions
+    : [];
+  const result: Record<string, AcpConfigValue> = {};
+  for (const option of options) {
+    if (!isRecord(option) || typeof option.id !== "string") continue;
+    if (
+      typeof option.currentValue === "string" ||
+      typeof option.currentValue === "boolean"
+    ) {
+      result[option.id] = option.currentValue;
+    }
+  }
+  return result;
+}
+
+async function setRuntimeConfigOption(
+  runtime: AcpRuntime,
+  handle: AcpRuntimeHandle,
+  key: string,
+  value: AcpConfigValue,
+): Promise<void> {
+  if (runtime.setConfigOption === undefined) {
+    throw new RuntimeHostError(
+      "MODEL_CONFIG_UNSUPPORTED",
+      `The ACP runtime cannot set model option ${key}`,
+    );
+  }
+  await runtime.setConfigOption({ handle, key, value });
 }
 
 function extractCatalogue(
@@ -1356,6 +1519,7 @@ function extractCatalogue(
       : { currentModelId: status.models.currentModelId }),
     models,
     configOptions: structuredClone(configOptions),
+    modelConfigOptions: {},
     availableCommands: structuredClone(status.availableCommands ?? []),
     runtimeCapabilities,
     featureSupport,

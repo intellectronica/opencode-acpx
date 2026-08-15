@@ -19,6 +19,11 @@ import {
   type ServerConfig,
 } from "./config.js";
 import {
+  projectAcpModels,
+  providerSelectionOptions,
+  type AcpModelSelection,
+} from "./model-variants.js";
+import {
   INTERACTION_TOOL_NAME,
   PACKAGE_NAME,
   PERMISSION_TOOL_NAME,
@@ -39,6 +44,15 @@ import type { CatalogueResult, RuntimeWorkerEvent } from "./worker/messages.js";
 type ProviderModelConfig = NonNullable<
   NonNullable<NonNullable<Config["provider"]>[string]["models"]>[string]
 >;
+
+type ProviderModelConfigWithVariants = ProviderModelConfig & {
+  variants?: Record<string, Record<string, unknown>>;
+};
+
+interface ProviderProjection {
+  models: Record<string, ProviderModelConfigWithVariants>;
+  routes: Map<string, AcpModelSelection>;
+}
 
 interface ConfigWithSkills extends Config {
   skills?: {
@@ -82,6 +96,7 @@ export function createServerPlugin(
       respondExtension: (params) => worker.respondExtension(params),
     });
     const serverBySessionKey = new Map<string, string>();
+    const variantsByMessage = new Map<string, string | undefined>();
     const unregisterRuntimes: (() => void)[] = [];
     const ledger = new BindingLedger({
       path: join(options.stateDir, "bindings.json"),
@@ -120,6 +135,14 @@ export function createServerPlugin(
       (serverId) =>
         logDiagnostic(input, "warn", "ACP_CATALOGUE_UNAVAILABLE", serverId),
     );
+    const providerProjections = new Map<string, ProviderProjection>();
+    for (const [serverId, server] of Object.entries(options.servers)) {
+      if (!server.enabled) continue;
+      providerProjections.set(
+        serverId,
+        buildProviderProjection(serverId, server, catalogues.get(serverId)),
+      );
+    }
 
     for (const [serverId, server] of Object.entries(options.servers)) {
       if (!server.enabled) continue;
@@ -140,13 +163,30 @@ export function createServerPlugin(
 
     const hooks: Hooks = {
       config: async (config) => {
+        await refreshTargetedCatalogues(
+          worker,
+          options,
+          input.directory,
+          config,
+          catalogues,
+          providerProjections,
+        );
         injectConfiguration(
           config,
           options,
           pluginInstanceId,
           dependencies.providerUrl ?? DEFAULT_PROVIDER_URL,
           catalogues,
+          providerProjections,
           input,
+        );
+        await Promise.resolve();
+      },
+      "chat.message": async (chat) => {
+        if (chat.messageID === undefined) return;
+        variantsByMessage.set(
+          `${chat.sessionID}\u0000${chat.messageID}`,
+          chat.variant,
         );
         await Promise.resolve();
       },
@@ -155,6 +195,20 @@ export function createServerPlugin(
         if (serverId === undefined) return;
         const server = options.servers[serverId];
         if (server === undefined) return;
+        const projection = providerProjections.get(serverId);
+        const messageKey = `${chat.sessionID}\u0000${chat.message.id}`;
+        const selectedVariant =
+          runtimeMessageVariant(chat.message) ??
+          variantsByMessage.get(messageKey);
+        variantsByMessage.delete(messageKey);
+        const route = projection?.routes.get(
+          modelRouteKey(chat.model.id, selectedVariant),
+        );
+        if (route === undefined) {
+          throw new Error(
+            `Unknown or stale ACP model variant ${chat.model.id}/${selectedVariant ?? "default"}`,
+          );
+        }
         const generation = 0;
         const sessionKey = await createSessionKey({
           serverId,
@@ -170,6 +224,13 @@ export function createServerPlugin(
         output.options.requestId = chat.message.id;
         output.options.generation = generation;
         output.options.agent = chat.agent;
+        output.options.opencodeAcpx = {
+          schema: 1,
+          ...(selectedVariant === undefined
+            ? { variantId: null }
+            : { variantId: selectedVariant }),
+          ...structuredClone(route),
+        };
         if (server.mode !== undefined && output.options.mode === undefined) {
           output.options.mode = server.mode;
         }
@@ -282,35 +343,155 @@ export function createServerPlugin(
   };
 }
 
+function runtimeMessageVariant(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null || Array.isArray(message))
+    return undefined;
+  const model = (message as Record<string, unknown>).model;
+  if (typeof model !== "object" || model === null || Array.isArray(model))
+    return undefined;
+  const variant = (model as Record<string, unknown>).variant;
+  return typeof variant === "string" && variant.length > 0
+    ? variant
+    : undefined;
+}
+
+async function refreshTargetedCatalogues(
+  worker: WorkerClient,
+  options: AcpxPluginOptions,
+  directory: string,
+  config: Config,
+  catalogues: Map<string, CatalogueResult>,
+  projections: Map<string, ProviderProjection>,
+): Promise<void> {
+  await Promise.all(
+    Object.entries(options.servers).map(async ([serverId, server]) => {
+      if (!server.enabled) return;
+      const existing = config.provider?.[providerId(serverId)];
+      const modelIds = unique([
+        ...(existing?.whitelist ?? []),
+        ...Object.keys(server.models),
+        ...(server.defaultModel === "default" ? [] : [server.defaultModel]),
+      ]).filter((id) => id !== "default");
+      if (modelIds.length === 0) return;
+      try {
+        const result = await withTimeout(
+          worker.catalogue({
+            serverId,
+            cwd: serverWorkingDirectory(server, directory),
+            modelIds,
+          }),
+          options.discoveryTimeoutMs,
+        );
+        if (!isCatalogueResult(result, serverId)) return;
+        catalogues.set(serverId, result);
+        projections.set(
+          serverId,
+          buildProviderProjection(serverId, server, result),
+        );
+      } catch {
+        return;
+      }
+    }),
+  );
+}
+
 export function buildProviderModels(
   serverId: string,
   server: ServerConfig,
   catalogue?: CatalogueResult,
 ): Record<string, ProviderModelConfig> {
-  const title = resolvePreset(server)?.title ?? serverId;
-  const models: Record<string, ProviderModelConfig> = {
-    default: modelConfig(`${title} default`, server.models.default),
+  return buildProviderProjection(serverId, server, catalogue).models;
+}
+
+function buildProviderProjection(
+  serverId: string,
+  server: ServerConfig,
+  catalogue?: CatalogueResult,
+): ProviderProjection {
+  const routes = new Map<string, AcpModelSelection>();
+  const projected = projectAcpModels({
+    preset: server.preset,
+    models: catalogue?.models ?? [],
+    ...(catalogue?.currentModelId === undefined
+      ? {}
+      : { currentModelId: catalogue.currentModelId }),
+    configOptions: catalogue?.configOptions ?? [],
+    modelConfigOptions: catalogue?.modelConfigOptions ?? {},
+    configuredDefaults: server.config,
+  });
+  const baselineConfig =
+    projected[0]?.selection.config ??
+    Object.fromEntries(
+      Object.entries(server.config).map(([key, value]) => [key, value]),
+    );
+  const defaultSelection: AcpModelSelection = {
+    ...(catalogue?.currentModelId === undefined
+      ? {}
+      : { modelId: catalogue.currentModelId }),
+    config: baselineConfig,
   };
-  for (const model of catalogue?.models ?? []) {
+  const models: Record<string, ProviderModelConfig> = {
+    default: modelConfig(
+      "Default",
+      server.models.default,
+      defaultSelection,
+      {},
+    ),
+  };
+  routes.set(modelRouteKey("default"), defaultSelection);
+  for (const model of projected) {
     if (model.id.length === 0 || model.id === "default") continue;
+    const configured = server.models[model.id];
+    const variants = mergeConfiguredVariants(
+      model.selection,
+      model.variants,
+      configured,
+    );
     models[model.id] = modelConfig(
       model.name ?? model.id,
-      server.models[model.id],
+      configured,
+      model.selection,
+      variants,
     );
+    routes.set(modelRouteKey(model.id), model.selection);
+    for (const [variantId, variant] of Object.entries(variants)) {
+      routes.set(modelRouteKey(model.id, variantId), variant.selection);
+    }
   }
   for (const [modelId, configured] of Object.entries(server.models)) {
-    models[modelId] = modelConfig(configured.name, configured);
+    const baseSelection = routes.get(modelRouteKey(modelId)) ?? {
+      ...(modelId === "default" ? {} : { modelId }),
+      config: { ...server.config },
+    };
+    const variants = mergeConfiguredVariants(baseSelection, {}, configured);
+    models[modelId] = modelConfig(
+      configured.name,
+      configured,
+      baseSelection,
+      variants,
+    );
+    routes.set(modelRouteKey(modelId), baseSelection);
+    for (const [variantId, variant] of Object.entries(variants)) {
+      routes.set(modelRouteKey(modelId, variantId), variant.selection);
+    }
   }
   if (
     server.defaultModel !== "default" &&
     models[server.defaultModel] === undefined
   ) {
+    const selection: AcpModelSelection = {
+      modelId: server.defaultModel,
+      config: { ...server.config },
+    };
     models[server.defaultModel] = modelConfig(
       server.defaultModel,
       server.models[server.defaultModel],
+      selection,
+      {},
     );
+    routes.set(modelRouteKey(server.defaultModel), selection);
   }
-  return models;
+  return { models, routes };
 }
 
 function injectConfiguration(
@@ -319,6 +500,7 @@ function injectConfiguration(
   pluginInstanceId: string,
   providerUrl: URL,
   catalogues: ReadonlyMap<string, CatalogueResult>,
+  providerProjections: ReadonlyMap<string, ProviderProjection>,
   input: Pick<PluginInput, "directory" | "worktree">,
 ): void {
   config.provider ??= {};
@@ -329,14 +511,12 @@ function injectConfiguration(
     const id = providerId(serverId);
     addedProviderIds.push(id);
     const existing = config.provider[id];
-    const models = buildProviderModels(
-      serverId,
-      server,
-      catalogues.get(serverId),
-    );
+    const models =
+      providerProjections.get(serverId)?.models ??
+      buildProviderModels(serverId, server, catalogues.get(serverId));
     config.provider[id] = {
       ...existing,
-      name: `${resolvePreset(server)?.title ?? serverId} through ACP`,
+      name: `${providerDisplayName(serverId, server)} (ACP)`,
       npm: providerUrl.href,
       options: { ...existing?.options, pluginInstanceId, serverId },
       models,
@@ -447,7 +627,10 @@ function serverIdForProvider(
 function modelConfig(
   name: string,
   configured?: ConfiguredModel,
-): ProviderModelConfig {
+  selection?: AcpModelSelection,
+  variants: Record<string, { selection: AcpModelSelection }> = {},
+): ProviderModelConfigWithVariants {
+  const configuredOptions = configured?.options ?? {};
   return {
     name,
     reasoning: configured?.reasoning ?? true,
@@ -458,8 +641,57 @@ function modelConfig(
       output: configured?.output ?? 0,
     },
     modalities: { input: ["text", "image", "audio"], output: ["text"] },
-    ...(configured === undefined ? {} : { options: configured.options }),
+    options: {
+      ...configuredOptions,
+      ...(selection === undefined ? {} : providerSelectionOptions(selection)),
+    },
+    variants: Object.fromEntries(
+      Object.entries(variants).map(([id, variant]) => [
+        id,
+        providerSelectionOptions(variant.selection),
+      ]),
+    ),
   };
+}
+
+function mergeConfiguredVariants(
+  base: AcpModelSelection,
+  discovered: Record<string, { selection: AcpModelSelection }>,
+  configured?: ConfiguredModel,
+): Record<string, { selection: AcpModelSelection }> {
+  const result = structuredClone(discovered);
+  for (const [id, variant] of Object.entries(configured?.variants ?? {})) {
+    result[id] = {
+      selection: {
+        ...((variant.modelId ?? base.modelId) === undefined
+          ? {}
+          : { modelId: variant.modelId ?? base.modelId }),
+        config: { ...base.config, ...variant.config },
+      },
+    };
+  }
+  return result;
+}
+
+function modelRouteKey(modelId: string, variantId?: string): string {
+  return `${modelId}\u0000${variantId ?? ""}`;
+}
+
+function providerDisplayName(serverId: string, server: ServerConfig): string {
+  switch (server.preset) {
+    case "cursor":
+      return "Cursor";
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "grok-build":
+      return "Grok Build";
+    case "hermes":
+      return "Hermes";
+    case "custom":
+      return serverId;
+  }
 }
 
 function isCatalogueResult(

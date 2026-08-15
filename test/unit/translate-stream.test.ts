@@ -136,6 +136,100 @@ describe("ACP stream translation", () => {
     });
   });
 
+  it("projects plans as host-executed native todowrite calls with unique continuation IDs", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const first = translator.todoSessionUpdate(
+      {
+        type: "session.update",
+        serverId: "cursor",
+        turnId: "turn-1",
+        notification: {
+          update: {
+            sessionUpdate: "plan",
+            entries: [{ content: "Inspect", status: "pending" }],
+          },
+        },
+      },
+      [],
+      "session-1",
+    );
+    const second = translator.todoSessionUpdate(
+      {
+        type: "session.update",
+        serverId: "cursor",
+        turnId: "turn-1",
+        notification: {
+          update: {
+            sessionUpdate: "plan",
+            entries: [{ content: "Inspect", status: "completed" }],
+          },
+        },
+      },
+      first?.todos ?? [],
+      "session-2",
+    );
+
+    const firstCall = first?.parts.find((part) => part.type === "tool-call");
+    expect(firstCall).toMatchObject({
+      toolName: "todowrite",
+      providerExecuted: false,
+    });
+    expect(
+      firstCall?.type === "tool-call" ? JSON.parse(firstCall.input) : {},
+    ).toEqual({
+      todos: [{ content: "Inspect", status: "pending", priority: "medium" }],
+    });
+    expect(second?.toolCallId).not.toBe(first?.toolCallId);
+  });
+
+  it("suppresses Cursor's empty updateTodos card until its rich notification arrives", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const event = {
+      type: "tool_call" as const,
+      text: "Update todos",
+      toolCallId: "todo-1",
+      kind: "other" as const,
+      rawInput: { _toolName: "updateTodos" },
+      status: "completed",
+    };
+    expect(translator.todoEvent(event, 0, [], "event-1")).toBeUndefined();
+    expect(translator.event(event, 0)).toEqual([]);
+  });
+
+  it.each([
+    "todo (2 items): Updating todo list - in_progress: Inspect files",
+    "tool call (completed): **Todo list** - completed: Inspect files",
+  ])(
+    "suppresses summary-only todo activity instead of showing acp_other: %s",
+    (summary) => {
+      const translator = new AcpStreamTranslator("turn-1");
+      const event = {
+        type: "tool_call" as const,
+        text: summary,
+        toolCallId: "todo-summary-1",
+        kind: "other" as const,
+        rawInput: { summary },
+        status: "completed",
+      };
+
+      expect(translator.todoEvent(event, 0, [], "event-1")).toBeUndefined();
+      expect(translator.event(event, 0)).toEqual([]);
+    },
+  );
+
+  it("suppresses anonymous status-only tool updates after a native projection", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const event = {
+      type: "tool_call" as const,
+      text: "tool call (completed)",
+      title: "tool call",
+      toolCallId: "anonymous-1",
+      status: "completed",
+    };
+
+    expect(translator.event(event, 0)).toEqual([]);
+  });
+
   it("projects Cursor task notifications as native task cards without duplicating a standard call", () => {
     const translator = new AcpStreamTranslator("turn-1");
     const initial = translator.event(

@@ -8,6 +8,7 @@ import type {
 } from "acpx/runtime";
 
 import type { PluginOptions } from "../config.js";
+import type { AcpConfigValue } from "../model-variants.js";
 
 export interface ConfigureParams {
   pluginInstanceId: string;
@@ -18,6 +19,7 @@ export interface ConfigureParams {
 export interface CatalogueParams {
   serverId: string;
   cwd: string;
+  modelIds?: string[];
 }
 
 export interface TurnStartParams {
@@ -28,6 +30,7 @@ export interface TurnStartParams {
   requestId: string;
   text: string;
   modelId?: string;
+  config?: Record<string, AcpConfigValue>;
   mode?: string;
   attachments?: { mediaType: string; data: string }[];
 }
@@ -83,6 +86,7 @@ export interface CatalogueResult {
   currentModelId?: string;
   models: CatalogueModel[];
   configOptions: unknown[];
+  modelConfigOptions: Record<string, unknown[]>;
   availableCommands: AcpRuntimeAvailableCommand[];
   runtimeCapabilities: AcpRuntimeCapabilities;
   featureSupport: WorkerCapabilityReport;
@@ -233,7 +237,7 @@ export interface WorkerMethodParams {
     serverId: string;
     sessionKey: string;
     key: string;
-    value: string;
+    value: AcpConfigValue;
   };
   "session.setMode": { serverId: string; sessionKey: string; mode: string };
   "session.close": {

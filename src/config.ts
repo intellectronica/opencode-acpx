@@ -56,6 +56,19 @@ export const configuredModelSchema = z
     context: z.number().int().nonnegative().default(0),
     output: z.number().int().nonnegative().default(0),
     options: z.record(z.string(), z.unknown()).default({}),
+    variants: z
+      .record(
+        z.string().min(1),
+        z
+          .object({
+            modelId: z.string().min(1).optional(),
+            config: z
+              .record(z.string(), z.union([z.string(), z.boolean()]))
+              .default({}),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
 export type ConfiguredModel = z.infer<typeof configuredModelSchema>;
