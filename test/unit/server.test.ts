@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-empty-function, @typescript-eslint/require-await */
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import type { Config, PluginInput } from "@opencode-ai/plugin";
 import { describe, expect, it, vi } from "vitest";
@@ -28,6 +29,7 @@ function fakeWorker() {
         },
       ],
       configOptions: [],
+      modelConfigOptions: {},
       availableCommands: [{ name: "review", description: "Review the change" }],
       runtimeCapabilities: { controls: [] },
       featureSupport: {},
@@ -67,6 +69,7 @@ function pluginInput(log = vi.fn(async () => ({}))): PluginInput {
 
 function options() {
   return {
+    stateDir: join(tmpdir(), "opencode-acpx-server-test", randomUUID()),
     discoveryTimeoutMs: 100,
     servers: {
       cursor: {
@@ -206,6 +209,36 @@ describe("server plugin", () => {
     await hooks.dispose?.();
   });
 
+  it("uses a successful catalogue from another process when live discovery fails", async () => {
+    const rawOptions = options();
+    const successfulWorker = fakeWorker();
+    const successfulHooks = await createServerPlugin({
+      createWorkerClient: () => successfulWorker as unknown as WorkerClient,
+      pluginInstanceId: () => "instance-catalogue-cache-writer",
+    })(pluginInput(), rawOptions);
+    await successfulHooks.dispose?.();
+
+    const failingWorker = fakeWorker();
+    failingWorker.catalogue.mockRejectedValue(new Error("Cursor is busy"));
+    const failingHooks = await createServerPlugin({
+      createWorkerClient: () => failingWorker as unknown as WorkerClient,
+      pluginInstanceId: () => "instance-catalogue-cache-reader",
+    })(pluginInput(), rawOptions);
+    const config: Config = {
+      provider: {
+        "acp.cursor": { whitelist: ["grok-4.6"] },
+      },
+    };
+
+    await failingHooks.config?.(config);
+
+    const model = config.provider?.["acp.cursor"]?.models?.["grok-4.6"] as
+      | { variants?: Record<string, unknown> }
+      | undefined;
+    expect(model?.variants).toHaveProperty("high-fast");
+    await failingHooks.dispose?.();
+  });
+
   it("logs only a redacted worker error code when initialisation fails", async () => {
     const worker = fakeWorker();
     worker.configure.mockRejectedValue(
@@ -244,11 +277,12 @@ describe("server plugin", () => {
       workerPath: "/plugin/shared-worker.js",
       shareWorker: true,
     });
+    const rawOptions = options();
 
-    const first = await plugin(pluginInput(), options());
+    const first = await plugin(pluginInput(), rawOptions);
     const second = await plugin(
       { ...pluginInput(), directory: "/second", worktree: "/second" },
-      options(),
+      rawOptions,
     );
 
     expect(createWorkerClient).toHaveBeenCalledOnce();

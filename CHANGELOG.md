@@ -21,6 +21,9 @@ plugin contract.
 
 ### Fixed
 
+- Reuse a validated last-known-good ACP model/config catalogue across OpenCode
+  processes and workspaces when a live startup probe is temporarily unavailable,
+  while keeping workspace commands isolated.
 - Keep whitelisted ACP providers visible and their exact model IDs routable
   when a startup catalogue probe is temporarily unavailable.
 - Start workers through Electron's verified Node mode or a resolved absolute

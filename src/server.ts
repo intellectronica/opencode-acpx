@@ -18,6 +18,7 @@ import {
   type PluginOptions as AcpxPluginOptions,
   type ServerConfig,
 } from "./config.js";
+import { CatalogueCache } from "./catalogue-cache.js";
 import {
   projectAcpModels,
   providerSelectionOptions,
@@ -131,6 +132,7 @@ export function createServerPlugin(
     const ledger = new BindingLedger({
       path: join(options.stateDir, "bindings.json"),
     });
+    const catalogueCache = new CatalogueCache(options.stateDir);
     let disposed = false;
 
     const unsubscribe = worker.subscribe((event) => {
@@ -159,6 +161,7 @@ export function createServerPlugin(
       worker,
       options,
       input.directory,
+      catalogueCache,
       (serverId) =>
         logDiagnostic(input, "warn", "ACP_CATALOGUE_UNAVAILABLE", serverId),
     );
@@ -197,6 +200,7 @@ export function createServerPlugin(
           config,
           catalogues,
           providerProjections,
+          catalogueCache,
         );
         injectConfiguration(
           config,
@@ -458,6 +462,7 @@ async function refreshTargetedCatalogues(
   config: Config,
   catalogues: Map<string, CatalogueResult>,
   projections: Map<string, ProviderProjection>,
+  catalogueCache: CatalogueCache,
 ): Promise<void> {
   await Promise.all(
     Object.entries(options.servers).map(async ([serverId, server]) => {
@@ -480,6 +485,14 @@ async function refreshTargetedCatalogues(
         );
         if (!isCatalogueResult(result, serverId)) return;
         catalogues.set(serverId, result);
+        await catalogueCache
+          .put(
+            serverId,
+            server,
+            serverWorkingDirectory(server, directory),
+            result,
+          )
+          .catch(() => undefined);
         projections.set(
           serverId,
           buildProviderProjection(serverId, server, result),
@@ -766,25 +779,36 @@ async function discoverCatalogues(
   worker: WorkerClient,
   options: AcpxPluginOptions,
   directory: string,
+  catalogueCache: CatalogueCache,
   onFailure: (serverId: string) => void,
 ): Promise<Map<string, CatalogueResult>> {
   const catalogues = new Map<string, CatalogueResult>();
   await Promise.all(
     Object.entries(options.servers).map(async ([serverId, server]) => {
       if (!server.enabled) return;
+      const cwd = serverWorkingDirectory(server, directory);
       try {
         const result = await withTimeout(
           worker.catalogue({
             serverId,
-            cwd: serverWorkingDirectory(server, directory),
+            cwd,
           }),
           options.discoveryTimeoutMs,
         );
-        if (isCatalogueResult(result, serverId))
+        if (isCatalogueResult(result, serverId)) {
           catalogues.set(serverId, result);
-        else onFailure(serverId);
+          await catalogueCache
+            .put(serverId, server, cwd, result)
+            .catch(() => undefined);
+        } else {
+          const cached = await catalogueCache.get(serverId, server, cwd);
+          if (cached === undefined) onFailure(serverId);
+          else catalogues.set(serverId, cached);
+        }
       } catch {
-        onFailure(serverId);
+        const cached = await catalogueCache.get(serverId, server, cwd);
+        if (cached === undefined) onFailure(serverId);
+        else catalogues.set(serverId, cached);
       }
     }),
   );
