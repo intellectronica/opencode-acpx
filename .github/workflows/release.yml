@@ -27,7 +27,7 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
-      - run: pnpm release:check -- "${GITHUB_REF_NAME}"
+      - run: pnpm release:check "${GITHUB_REF_NAME}"
       - run: pnpm check
       - name: Publish package
         run: |

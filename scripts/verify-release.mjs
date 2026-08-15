@@ -5,7 +5,9 @@ const manifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const expectedTag = `v${manifest.version}`;
-const actualTag = process.argv[2] ?? process.env.GITHUB_REF_NAME;
+const actualTag =
+  process.argv.slice(2).find((argument) => argument !== "--") ??
+  process.env.GITHUB_REF_NAME;
 
 if (manifest.name !== "opencode-acpx") {
   throw new Error(`Unexpected package name: ${String(manifest.name)}`);
