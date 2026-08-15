@@ -491,7 +491,7 @@ describe("OpenCode Acpx language provider", () => {
         expect.objectContaining({ type: "tool-call", providerExecuted: true }),
         expect.objectContaining({
           type: "tool-result",
-          result: { matches: 2 },
+          result: '{\n  "matches": 2\n}',
         }),
       ]),
     );
@@ -500,5 +500,117 @@ describe("OpenCode Acpx language provider", () => {
       inputTokens: { total: 10 },
       outputTokens: { total: 5, text: 3, reasoning: 2 },
     });
+  });
+
+  it("routes correlated vendor subagent notifications through the provider stream", async () => {
+    const { client, model, providerId } = setup("acp.cursor.subagent");
+    client.onStart = (params, channel) => {
+      channel.push({
+        type: "turn.event",
+        turnId: params.turnId,
+        index: 0,
+        event: {
+          type: "tool_call",
+          text: "Explore",
+          toolCallId: "task-1",
+          kind: "other",
+          rawInput: {
+            _toolName: "task",
+            prompt: "Inspect files",
+            description: "Explore",
+            subagentType: "explore",
+          },
+          status: "in_progress",
+        },
+      });
+      client.emit({
+        type: "extension.notification",
+        serverId: "cursor",
+        sessionKey: params.sessionKey,
+        turnId: params.turnId,
+        method: "cursor/task",
+        params: {
+          toolCallId: "task-1",
+          description: "Explore",
+          prompt: "Inspect files",
+          subagentType: "explore",
+          durationMs: 100,
+        },
+      });
+      channel.push({
+        type: "turn.result",
+        turnId: params.turnId,
+        index: 1,
+        result: { status: "completed", stopReason: "end_turn" },
+      });
+    };
+
+    const parts = await readStream(
+      (await model.doStream(call(providerId))).stream,
+    );
+    expect(parts.filter((part) => part.type === "tool-call")).toHaveLength(1);
+    expect(parts.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+      providerExecuted: true,
+    });
+    expect(parts.find((part) => part.type === "tool-result")).toMatchObject({
+      toolName: "task",
+      result: { durationMs: 100 },
+    });
+  });
+
+  it("acknowledges Cursor activity requests without exposing control-tool cards", async () => {
+    const { client, model, providerId } = setup("acp.cursor.activity");
+    client.onStart = (params) => {
+      client.emit({
+        type: "interaction.extension",
+        turnId: params.turnId,
+        interactionId: "cursor-task-1",
+        serverId: "cursor",
+        sessionKey: params.sessionKey,
+        expiresAt: Date.now() + 60_000,
+        method: "cursor/task",
+        params: {
+          toolCallId: "task-1",
+          description: "Explore",
+          prompt: "Inspect the repository",
+          subagentType: "explore",
+          durationMs: 42,
+        },
+      });
+    };
+    client.respondExtension.mockImplementation(() => {
+      const channel = [...client.channels.values()][0];
+      if (channel === undefined) throw new Error("missing channel");
+      channel.push({
+        type: "turn.result",
+        turnId: channel.turnId,
+        index: 0,
+        result: { status: "completed" },
+      });
+      return Promise.resolve(undefined);
+    });
+
+    const parts = await readStream(
+      (await model.doStream(call(providerId))).stream,
+    );
+
+    expect(client.respondExtension).toHaveBeenCalledWith({
+      interactionId: "cursor-task-1",
+      result: {},
+    });
+    expect(parts).toContainEqual(
+      expect.objectContaining({ type: "tool-call", toolName: "task" }),
+    );
+    expect(parts).toContainEqual(
+      expect.objectContaining({ type: "tool-result", toolName: "task" }),
+    );
+    expect(
+      parts.some(
+        (part) =>
+          part.type === "tool-call" &&
+          part.toolName === "opencode_acp_interaction",
+      ),
+    ).toBe(false);
   });
 });

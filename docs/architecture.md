@@ -89,8 +89,19 @@ calls. The provider therefore segments one ACP turn:
 6. emit the final `finish` only when ACP completes.
 
 ACP-native tool calls are marked `providerExecuted: true`; OpenCode renders but
-does not execute them. Reserved interaction calls are host-executed and use
-unguessable, expiring tokens bound to the OpenCode and ACP sessions.
+does not execute them. A shared projector maps ACP `execute`, `read`, `search`,
+`edit` and `fetch` events onto native OpenCode presentation contracts while
+retaining ACP status, locations, raw input/output and content as provider
+metadata. Unknown shapes keep a namespaced generic tool name. Reserved
+interaction calls are host-executed and use unguessable, expiring tokens bound
+to the OpenCode and ACP sessions.
+
+Subagent activity follows the same rule. Standard task-shaped calls cover
+Claude, Codex and compatible agents. Cursor's session-less `cursor/task`
+notification is correlated back to the active turn by its ACP tool-call ID;
+Grok's spawn/progress/finish notifications maintain one synthetic native task
+lifecycle. ACP child identifiers remain metadata because they are not OpenCode
+child-session identifiers and must not become broken UI links.
 
 ## Discovery
 

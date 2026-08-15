@@ -6,21 +6,22 @@ default.
 
 ## Shared feature mapping
 
-| ACP feature                               | OpenCode representation                                              |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| Model config option or legacy model state | Provider model catalogue                                             |
-| Model parameters and thought level        | Model options/variants and session config                            |
-| Agent mode                                | Session control and configured default                               |
-| Agent text                                | Assistant text                                                       |
-| Agent thought                             | Reasoning                                                            |
-| Agent-native tool                         | Provider-executed dynamic tool                                       |
-| Plan                                      | ACP update retained on the private worker event channel              |
-| Permission request                        | Reserved plugin tool and OpenCode permission UI                      |
-| Form or URL elicitation                   | Question/control tool when representable; otherwise cancel           |
-| Available command                         | Startup OpenCode command snapshot                                    |
-| Agent-native skill                        | Remains available inside the agent                                   |
-| Session lifecycle                         | Persistent Acpx binding with capability-gated load/resume/close/fork |
-| MCP server                                | ACP session MCP definition, capability-gated by transport            |
+| ACP feature                               | OpenCode representation                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------- |
+| Model config option or legacy model state | Provider model catalogue                                                  |
+| Model parameters and thought level        | Model options/variants and session config                                 |
+| Agent mode                                | Session control and configured default                                    |
+| Agent text                                | Assistant text                                                            |
+| Agent thought                             | Reasoning                                                                 |
+| Agent-native tool                         | Provider-executed native OpenCode card where recognised; generic fallback |
+| Subagent activity                         | Native OpenCode task card where standard/vendor metadata permits          |
+| Plan                                      | ACP update retained on the private worker event channel                   |
+| Permission request                        | Reserved plugin tool and OpenCode permission UI                           |
+| Form or URL elicitation                   | Question/control tool when representable; otherwise cancel                |
+| Available command                         | Startup OpenCode command snapshot                                         |
+| Agent-native skill                        | Remains available inside the agent                                        |
+| Session lifecycle                         | Persistent Acpx binding with capability-gated load/resume/close/fork      |
+| MCP server                                | ACP session MCP definition, capability-gated by transport                 |
 
 ACP v1 has no global model or skill catalogue. Discovery is session-scoped and
 dynamic. Catalogue entries are therefore per-instance snapshots;
@@ -41,6 +42,9 @@ re-authentication or an agent update may require an OpenCode reload.
 - Native rules, skills, commands, plugins, hooks, MCP, code index and subagents
   remain active. Advertised commands are surfaced where OpenCode permits.
 - Cursor ask/plan/todo/task/image extension methods are version-gated.
+- Standard task tool calls and `cursor/task` completion notifications are
+  correlated into one native OpenCode task card without inventing a host child
+  session link.
 
 ### Claude Agent ACP
 
@@ -51,6 +55,8 @@ re-authentication or an agent update may require an OpenCode reload.
 - AskUserQuestion requires form elicitation; device/remote login may require URL
   elicitation or a terminal-auth action.
 - Native Claude commands and skills arrive through available-command updates.
+- Claude Task/Agent calls with prompt, description and subagent type metadata
+  are projected as native OpenCode task cards.
 
 ### Codex ACP
 
@@ -62,6 +68,8 @@ re-authentication or an agent update may require an OpenCode reload.
 - Codex slash commands and `$skill` entries are surfaced from runtime updates.
 - Standard form/URL elicitation covers request-user-input and device auth where
   advertised.
+- Codex collaboration and sub-agent activity calls are projected as native
+  OpenCode task cards while preserving thread identifiers in ACP metadata.
 
 ### Grok Build
 
@@ -71,6 +79,8 @@ re-authentication or an agent update may require an OpenCode reload.
   applied before the first prompt.
 - Native skills, workflows, plugins, hooks, memory, MCP and subagents remain in
   Grok. `x.ai/*` extensions are handled only when their schemas are recognised.
+- Recognised `subagent_spawned`, `subagent_progress` and `subagent_finished`
+  notifications produce one running native task card and its final result.
 - The current CLI remains alpha; every exact build receives a capability
   fingerprint and newer builds warn until tested.
 
@@ -84,6 +94,8 @@ re-authentication or an agent update may require an OpenCode reload.
 - Modes: `default`, `accept_edits`, `dont_ask` when advertised.
 - Native tools, memory and skills remain active, but installed skills are not
   individually advertised as ACP commands in Hermes 0.20.1.
+- Hermes subagent-like calls use the shared ACP task-shape detector; the current
+  adapter does not advertise a separate subagent lifecycle extension.
 - The current agent accepts session MCP servers without advertising MCP
   capabilities; this is reported as a compatibility warning.
 

@@ -17,18 +17,29 @@ import {
 } from "../constants.js";
 import type {
   ElicitationInteraction,
+  ExtensionNotificationEvent,
   ExtensionInteraction,
   PermissionInteraction,
 } from "../worker/messages.js";
+import {
+  jsonValue,
+  projectSubagentNotification,
+  projectToolCall,
+  projectToolResult,
+  type ToolProjection,
+} from "./tools.js";
 
 interface OpenBlock {
   kind: "text" | "reasoning";
   id: string;
 }
+type ToolEvent = Extract<AcpRuntimeEvent, { type: "tool_call" }>;
 interface ToolState {
   name: string;
+  projection: ToolProjection;
   callEmitted: boolean;
   finalResultEmitted: boolean;
+  deferredEvent?: ToolEvent;
 }
 
 interface QuestionInput {
@@ -53,31 +64,6 @@ const terminalToolStatuses = new Set([
   "rejected",
   "cancelled",
 ]);
-
-function jsonValue(value: unknown): JSONValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return value;
-  if (typeof value === "number")
-    return Number.isFinite(value) ? value : String(value);
-  if (Array.isArray(value)) return value.map(jsonValue);
-  if (typeof value === "object") {
-    const result: Record<string, JSONValue> = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (
-        item !== undefined &&
-        typeof item !== "function" &&
-        typeof item !== "symbol"
-      ) {
-        result[key] = jsonValue(item);
-      }
-    }
-    return result;
-  }
-  if (value === undefined) return "undefined";
-  if (typeof value === "bigint") return value.toString();
-  if (typeof value === "symbol") return value.description ?? "symbol";
-  return "unsupported";
-}
 
 function safeStringify(value: unknown): string {
   return JSON.stringify(jsonValue(value));
@@ -202,12 +188,6 @@ function questionToolCallId(interactionId: string): string {
   return `opencode-acpx-question:${Buffer.from(interactionId, "utf8").toString("base64url")}`;
 }
 
-function toolName(
-  event: Extract<AcpRuntimeEvent, { type: "tool_call" }>,
-): string {
-  return `acp_${event.kind ?? "tool"}`;
-}
-
 function finishReason(
   result: AcpRuntimeTurnResult,
 ): LanguageModelV3FinishReason {
@@ -280,10 +260,12 @@ export class AcpStreamTranslator {
       if (event.breakdown !== undefined) this.#usage = event.breakdown;
       return [];
     }
-    if (event.type === "text_delta") return this.#text(event);
+    if (event.type === "text_delta")
+      return [...this.#flushDeferredTools(), ...this.#text(event)];
     if (event.type === "tool_call") return this.#tool(event, index);
     if (event.type === "error") {
       return [
+        ...this.#flushDeferredTools(),
         ...this.#closeBlock(),
         { type: "error", error: new Error(event.message) },
       ];
@@ -373,8 +355,66 @@ export class AcpStreamTranslator {
     };
   }
 
-  terminal(result: AcpRuntimeTurnResult): LanguageModelV3StreamPart[] {
+  extensionNotification(
+    event: ExtensionNotificationEvent,
+  ): LanguageModelV3StreamPart[] {
+    const projection = projectSubagentNotification(event.method, event.params);
+    if (projection === undefined) return [];
     const parts = this.#closeBlock();
+    const id = `${this.#turnId}-tool-${projection.toolCallId}`;
+    let state = this.#tools.get(id);
+    if (state !== undefined && state.name !== "task") return parts;
+    if (state === undefined) {
+      const toolProjection: ToolProjection = {
+        name: "task",
+        presentation: "task",
+        input: projection.input,
+      };
+      state = {
+        name: "task",
+        projection: toolProjection,
+        callEmitted: false,
+        finalResultEmitted: false,
+      };
+      this.#tools.set(id, state);
+    } else if (!state.callEmitted) {
+      state.projection = {
+        name: "task",
+        presentation: "task",
+        input: projection.input,
+      };
+      state.name = "task";
+    }
+    if (!state.callEmitted) {
+      parts.push(...this.#providerToolCall(id, state));
+      state.callEmitted = true;
+    }
+    if (projection.action !== "finish" || state.finalResultEmitted)
+      return parts;
+    delete state.deferredEvent;
+    state.finalResultEmitted = true;
+    parts.push({
+      type: "tool-result",
+      toolCallId: id,
+      toolName: state.name,
+      result: projection.result ?? { status: "completed" },
+      dynamic: true,
+      providerMetadata: {
+        opencodeAcpx: {
+          subagent: {
+            method: event.method,
+            action: projection.action,
+            toolCallId: projection.toolCallId,
+          },
+        },
+      },
+      ...(projection.isError === true ? { isError: true } : {}),
+    });
+    return parts;
+  }
+
+  terminal(result: AcpRuntimeTurnResult): LanguageModelV3StreamPart[] {
+    const parts = [...this.#flushDeferredTools(), ...this.#closeBlock()];
     if (result.status === "failed")
       parts.push({ type: "error", error: new Error(result.error.message) });
     parts.push({
@@ -409,63 +449,108 @@ export class AcpStreamTranslator {
     return parts;
   }
 
-  #tool(
-    event: Extract<AcpRuntimeEvent, { type: "tool_call" }>,
-    index: number,
-  ): LanguageModelV3StreamPart[] {
-    const parts = this.#closeBlock();
+  #tool(event: ToolEvent, index: number): LanguageModelV3StreamPart[] {
     const id = `${this.#turnId}-tool-${event.toolCallId ?? String(index)}`;
+    const parts = this.#closeBlock();
+    const projection = projectToolCall(event);
     const state = this.#tools.get(id) ?? {
-      name: toolName(event),
+      name: projection.name,
+      projection,
       callEmitted: false,
       finalResultEmitted: false,
     };
     this.#tools.set(id, state);
-    if (!state.callEmitted) {
-      const input = safeStringify(event.rawInput ?? { summary: event.text });
-      parts.push(
-        {
-          type: "tool-input-start",
-          id,
-          toolName: state.name,
-          providerExecuted: true,
-          dynamic: true,
-          ...(event.title === undefined ? {} : { title: event.title }),
-        },
-        { type: "tool-input-delta", id, delta: input },
-        { type: "tool-input-end", id },
-        {
-          type: "tool-call",
-          toolCallId: id,
-          toolName: state.name,
-          input,
-          providerExecuted: true,
-          dynamic: true,
-        },
-      );
-      state.callEmitted = true;
-    }
     const terminal =
       event.status === undefined ||
       terminalToolStatuses.has(event.status.toLowerCase());
+    if (
+      state.name === "task" &&
+      !state.callEmitted &&
+      state.projection.input.prompt === undefined &&
+      state.projection.input.subagent_type === undefined
+    ) {
+      state.deferredEvent = event;
+      return parts;
+    }
+    if (!state.callEmitted) {
+      parts.push(...this.#providerToolCall(id, state, event.title));
+      state.callEmitted = true;
+    }
     if (!terminal || state.finalResultEmitted) return parts;
     state.finalResultEmitted = true;
-    const output = event.rawOutput ?? event.content ?? event.text;
-    const translatedOutput = jsonValue(output);
+    parts.push(this.#providerToolResult(id, state, event));
+    return parts;
+  }
+
+  #flushDeferredTools(exceptId?: string): LanguageModelV3StreamPart[] {
+    const parts: LanguageModelV3StreamPart[] = [];
+    for (const [id, state] of this.#tools) {
+      if (id === exceptId || state.deferredEvent === undefined) continue;
+      const event = state.deferredEvent;
+      delete state.deferredEvent;
+      if (!state.callEmitted) {
+        parts.push(...this.#providerToolCall(id, state, event.title));
+        state.callEmitted = true;
+      }
+      const terminal =
+        event.status === undefined ||
+        terminalToolStatuses.has(event.status.toLowerCase());
+      if (terminal && !state.finalResultEmitted) {
+        state.finalResultEmitted = true;
+        parts.push(this.#providerToolResult(id, state, event));
+      }
+    }
+    return parts;
+  }
+
+  #providerToolResult(
+    id: string,
+    state: ToolState,
+    event: ToolEvent,
+  ): LanguageModelV3StreamPart {
+    const output = projectToolResult(state.projection, event);
     const lowerStatus = event.status?.toLowerCase();
-    parts.push({
+    return {
       type: "tool-result",
       toolCallId: id,
       toolName: state.name,
-      result: translatedOutput ?? { value: null },
+      result: output.result,
       dynamic: true,
+      providerMetadata: output.providerMetadata,
       ...(lowerStatus === "failed" ||
       lowerStatus === "error" ||
       lowerStatus === "rejected"
         ? { isError: true }
         : {}),
-    });
-    return parts;
+    };
+  }
+
+  #providerToolCall(
+    id: string,
+    state: ToolState,
+    title?: string,
+  ): LanguageModelV3StreamPart[] {
+    const input = safeStringify(state.projection.input);
+    return [
+      {
+        type: "tool-input-start",
+        id,
+        toolName: state.name,
+        providerExecuted: true,
+        dynamic: true,
+        ...(title === undefined ? {} : { title }),
+      },
+      { type: "tool-input-delta", id, delta: input },
+      { type: "tool-input-end", id },
+      {
+        type: "tool-call",
+        toolCallId: id,
+        toolName: state.name,
+        input,
+        providerExecuted: true,
+        dynamic: true,
+      },
+    ];
   }
 
   #closeBlock(): LanguageModelV3StreamPart[] {

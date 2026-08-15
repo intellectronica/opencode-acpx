@@ -35,6 +35,8 @@ Unit tests cover:
 - prompt extraction and attachment validation;
 - balanced AI SDK text/reasoning events;
 - provider-executed ACP tool lifecycles;
+- native shell/read/search/edit/web projection with generic fallbacks;
+- Cursor, Claude, Codex and Grok subagent task projection and de-duplication;
 - finish reason and usage mapping;
 - interaction segmentation and cursor replay;
 - exact permission/question correlation;
