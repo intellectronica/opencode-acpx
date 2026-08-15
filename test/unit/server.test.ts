@@ -20,7 +20,13 @@ function fakeWorker() {
     catalogue: vi.fn(async ({ serverId }: { serverId: string }) => ({
       serverId,
       cwd: TEST_DIRECTORY,
-      models: [{ id: "composer", name: "Composer" }],
+      models: [
+        { id: "composer", name: "Composer" },
+        {
+          id: "grok-4.6[effort=high,fast=true]",
+          name: "Grok 4.6",
+        },
+      ],
       configOptions: [],
       availableCommands: [{ name: "review", description: "Review the change" }],
       runtimeCapabilities: { controls: [] },
@@ -94,6 +100,13 @@ describe("server plugin", () => {
     const hooks = await plugin(pluginInput(), options());
     const config: Config & { skills?: { paths?: string[] } } = {
       enabled_providers: ["anthropic"],
+      provider: {
+        "acp.cursor": {
+          whitelist: ["grok-4.6"],
+          blacklist: ["default"],
+          options: { configuredByUser: true },
+        },
+      },
       command: {
         "acp-cursor": { template: "preserve me" },
       },
@@ -110,7 +123,13 @@ describe("server plugin", () => {
     expect(config.provider?.["acp.cursor"]).toMatchObject({
       name: "Cursor Agent through ACP",
       npm: "file:///plugin/provider.js",
-      options: { pluginInstanceId: "instance-1", serverId: "cursor" },
+      whitelist: ["grok-4.6[effort=high,fast=true]"],
+      blacklist: ["default"],
+      options: {
+        configuredByUser: true,
+        pluginInstanceId: "instance-1",
+        serverId: "cursor",
+      },
       models: {
         default: { name: "Cursor Agent default", tool_call: true },
         composer: { name: "Composer" },

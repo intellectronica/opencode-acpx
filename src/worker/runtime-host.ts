@@ -115,6 +115,7 @@ interface TurnRecord {
   index: number;
   abortController: AbortController;
   lastUsedAt: number;
+  toolCallKeys: Set<string>;
   turn?: AcpRuntimeTurn;
   result?: AcpRuntimeTurnResult;
   task?: Promise<void>;
@@ -196,6 +197,7 @@ export class RuntimeHost {
   readonly #turns = new Map<string, TurnRecord>();
   readonly #turnByRequest = new Map<string, string>();
   readonly #turnByBackendSession = new Map<string, string>();
+  readonly #turnByToolCall = new Map<string, string>();
   readonly #sessionByBackend = new Map<
     string,
     { serverId: string; sessionKey: string }
@@ -332,6 +334,7 @@ export class RuntimeHost {
       index: 0,
       abortController: new AbortController(),
       lastUsedAt: this.#now(),
+      toolCallKeys: new Set(),
     };
     this.#turns.set(params.turnId, record);
     this.#turnByRequest.set(requestKey, params.turnId);
@@ -511,6 +514,10 @@ export class RuntimeHost {
       if (this.#turnByRequest.get(record.requestKey) === turnId) {
         this.#turnByRequest.delete(record.requestKey);
       }
+      for (const key of record.toolCallKeys) {
+        if (this.#turnByToolCall.get(key) === turnId)
+          this.#turnByToolCall.delete(key);
+      }
     }
   }
 
@@ -561,6 +568,7 @@ export class RuntimeHost {
     this.#reverseInteractions.clear();
     this.#sessionByBackend.clear();
     this.#turnByBackendSession.clear();
+    this.#turnByToolCall.clear();
     this.#turnByRequest.clear();
     this.#turns.clear();
     this.#runtimes.clear();
@@ -596,6 +604,11 @@ export class RuntimeHost {
     record.turn = turn;
     try {
       for await (const event of turn.events) {
+        if (event.type === "tool_call" && event.toolCallId !== undefined) {
+          const key = this.#toolCallKey(params.serverId, event.toolCallId);
+          this.#turnByToolCall.set(key, params.turnId);
+          record.toolCallKeys.add(key);
+        }
         this.#emit({
           type: "turn.event",
           turnId: params.turnId,
@@ -1235,7 +1248,18 @@ export class RuntimeHost {
     payload: unknown,
   ): { sessionKey?: string; turnId?: string } {
     const backendSessionId = findSessionId(payload);
-    if (backendSessionId === undefined) return {};
+    if (backendSessionId === undefined) {
+      const toolCallId = findToolCallId(payload);
+      if (toolCallId === undefined) return {};
+      const turnId = this.#turnByToolCall.get(
+        this.#toolCallKey(serverId, toolCallId),
+      );
+      if (turnId === undefined) return {};
+      const record = this.#turns.get(turnId);
+      return record === undefined
+        ? { turnId }
+        : { sessionKey: record.params.sessionKey, turnId };
+    }
     const backendKey = this.#backendSessionKey(serverId, backendSessionId);
     const turnId = this.#turnByBackendSession.get(backendKey);
     if (turnId !== undefined) {
@@ -1254,6 +1278,10 @@ export class RuntimeHost {
 
   #backendSessionKey(serverId: string, backendSessionId: string): string {
     return `${serverId}\u0000${backendSessionId}`;
+  }
+
+  #toolCallKey(serverId: string, toolCallId: string): string {
+    return `${serverId}\u0000${toolCallId}`;
   }
 
   #requestKey(params: TurnStartParams): string {
@@ -1377,6 +1405,28 @@ function findSessionId(value: unknown, depth = 0): string | undefined {
   if (direct !== undefined) return direct;
   for (const key of ["params", "request", "notification", "message"]) {
     const nested = findSessionId(value[key], depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+}
+
+function findToolCallId(value: unknown, depth = 0): string | undefined {
+  if (!isRecord(value) || depth > 3) return undefined;
+  const direct = stringField(value, [
+    "toolCallId",
+    "tool_call_id",
+    "callId",
+    "call_id",
+  ]);
+  if (direct !== undefined) return direct;
+  for (const key of [
+    "params",
+    "request",
+    "notification",
+    "message",
+    "update",
+  ]) {
+    const nested = findToolCallId(value[key], depth + 1);
     if (nested !== undefined) return nested;
   }
   return undefined;

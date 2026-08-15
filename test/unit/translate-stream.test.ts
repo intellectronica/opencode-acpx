@@ -67,13 +67,15 @@ describe("ACP stream translation", () => {
 
     expect(call).toMatchObject({
       toolCallId: "turn-1-tool-remote-1",
-      toolName: "acp_read",
+      toolName: "read",
       providerExecuted: true,
       dynamic: true,
     });
+    if (call?.type !== "tool-call") throw new Error("missing tool call");
+    expect(JSON.parse(call.input)).toEqual({ filePath: "README.md" });
     expect(result).toMatchObject({
       toolCallId: "turn-1-tool-remote-1",
-      result: { text: "hello" },
+      result: { loaded: ["README.md"] },
     });
   });
 
@@ -131,6 +133,189 @@ describe("ACP stream translation", () => {
         inputTokens: { total: 100, noCache: 70, cacheRead: 20, cacheWrite: 10 },
         outputTokens: { total: 30, text: 25, reasoning: 5 },
       },
+    });
+  });
+
+  it("projects Cursor task notifications as native task cards without duplicating a standard call", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const initial = translator.event(
+      {
+        type: "tool_call",
+        text: "Explore",
+        toolCallId: "task-1",
+        kind: "other",
+        rawInput: {
+          _toolName: "task",
+          prompt: "Inspect files",
+          description: "Explore",
+          subagentType: "explore",
+        },
+        status: "in_progress",
+      },
+      0,
+    );
+    const completed = translator.extensionNotification({
+      type: "extension.notification",
+      serverId: "cursor",
+      sessionKey: "session-1",
+      turnId: "turn-1",
+      method: "cursor/task",
+      params: {
+        toolCallId: "task-1",
+        description: "Explore",
+        prompt: "Inspect files",
+        subagentType: "explore",
+        durationMs: 100,
+      },
+    });
+
+    expect(initial.filter((part) => part.type === "tool-call")).toHaveLength(1);
+    expect(initial.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+    });
+    expect(completed.filter((part) => part.type === "tool-call")).toHaveLength(
+      0,
+    );
+    expect(completed.find((part) => part.type === "tool-result")).toMatchObject(
+      {
+        toolName: "task",
+        result: { durationMs: 100 },
+      },
+    );
+  });
+
+  it("enriches a completed Cursor task with request metadata before rendering it", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const generic = translator.event(
+      {
+        type: "tool_call",
+        text: "Task: Subagent task",
+        title: "Task: Subagent task",
+        toolCallId: "task-1",
+        kind: "other",
+        rawInput: { _toolName: "task" },
+        status: "completed",
+      },
+      0,
+    );
+    const enriched = translator.extensionNotification({
+      type: "extension.notification",
+      serverId: "cursor",
+      sessionKey: "session-1",
+      turnId: "turn-1",
+      method: "cursor/task",
+      params: {
+        toolCallId: "task-1",
+        description: "Explore ACP runtime",
+        prompt: "Inspect the repository",
+        subagentType: "explore",
+        durationMs: 100,
+      },
+    });
+
+    expect(generic.some((part) => part.type === "tool-call")).toBe(false);
+    expect(enriched.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+      input: JSON.stringify({
+        prompt: "Inspect the repository",
+        description: "Explore ACP runtime",
+        subagent_type: "explore",
+      }),
+    });
+    expect(enriched.find((part) => part.type === "tool-result")).toMatchObject({
+      toolName: "task",
+      result: { durationMs: 100 },
+    });
+  });
+
+  it("flushes a deferred task safely when no vendor lifecycle arrives", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const deferred = translator.event(
+      {
+        type: "tool_call",
+        text: "Task: Subagent task",
+        toolCallId: "task-1",
+        kind: "other",
+        rawInput: { _toolName: "task" },
+        status: "completed",
+      },
+      0,
+    );
+    const terminal = translator.terminal({ status: "completed" });
+
+    expect(deferred).toEqual([]);
+    expect(terminal.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+    });
+    expect(terminal.find((part) => part.type === "tool-result")).toMatchObject({
+      toolName: "task",
+    });
+  });
+
+  it("does not turn deferred in-progress task activity into a false result", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    translator.event(
+      {
+        type: "tool_call",
+        text: "Task: Subagent task (pending)",
+        toolCallId: "task-1",
+        kind: "other",
+        rawInput: { _toolName: "task" },
+        status: "pending",
+      },
+      0,
+    );
+    const nextText = translator.event(
+      { type: "text_delta", text: "Continuing", stream: "output" },
+      1,
+    );
+
+    expect(nextText.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+    });
+    expect(nextText.some((part) => part.type === "tool-result")).toBe(false);
+  });
+
+  it("keeps a Grok subagent task running from spawn until finish", () => {
+    const translator = new AcpStreamTranslator("turn-1");
+    const spawn = translator.extensionNotification({
+      type: "extension.notification",
+      serverId: "grok-build",
+      sessionKey: "session-1",
+      turnId: "turn-1",
+      method: "x.ai/session_notification",
+      params: {
+        sessionId: "parent",
+        update: {
+          sessionUpdate: "subagent_spawned",
+          subagent_id: "sub-1",
+          description: "Research",
+          subagent_type: "explore",
+        },
+      },
+    });
+    const finish = translator.extensionNotification({
+      type: "extension.notification",
+      serverId: "grok-build",
+      sessionKey: "session-1",
+      turnId: "turn-1",
+      method: "x.ai/session_notification",
+      params: {
+        sessionId: "parent",
+        update: {
+          sessionUpdate: "subagent_finished",
+          subagent_id: "sub-1",
+          status: "completed",
+        },
+      },
+    });
+
+    expect(spawn.find((part) => part.type === "tool-call")).toMatchObject({
+      toolName: "task",
+    });
+    expect(spawn.some((part) => part.type === "tool-result")).toBe(false);
+    expect(finish.find((part) => part.type === "tool-result")).toMatchObject({
+      toolName: "task",
     });
   });
 

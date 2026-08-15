@@ -105,6 +105,27 @@ identifiers or vendor-qualified IDs. A zero limit means unknown and disables
 OpenCode context-overflow handling; the ACP agent remains responsible for its
 own context.
 
+### OpenCode model filters
+
+Normal OpenCode provider filters apply after ACP discovery:
+
+```jsonc
+{
+  "provider": {
+    "acp.cursor": {
+      "whitelist": ["grok-4.6"],
+    },
+  },
+}
+```
+
+The plugin preserves both `whitelist` and `blacklist`. An exact opaque model ID
+is used unchanged. A convenient base ID such as `grok-4.6` expands to currently
+discovered parameterised IDs such as
+`grok-4.6[effort=high,fast=true]`; it does not act as a substring match. This
+keeps the filter usable across Cursor catalogue refreshes without discarding
+the exact ID that ACP needs for selection.
+
 ### MCP servers
 
 Stdio:

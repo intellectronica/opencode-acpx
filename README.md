@@ -19,7 +19,9 @@ callbacks required for full-fidelity ACP operation.
   fallback.
 - One durable ACP conversation per OpenCode session, server and worktree.
 - Streaming assistant text, thought/reasoning, usage, plans and provider-owned
-  tool calls without re-executing those tools in OpenCode.
+  tool calls without re-executing those tools in OpenCode. Standard ACP tool
+  kinds are projected onto OpenCode's native shell, read, list, grep, glob,
+  edit, write, web and task cards when the agent supplies enough metadata.
 - OpenCode-native permission prompts with exact ACP `allow_once`,
   `allow_always`, `reject_once` and cancellation correlation.
 - Standard form elicitation and Cursor questions through OpenCode's built-in
@@ -28,7 +30,10 @@ callbacks required for full-fidelity ACP operation.
   authentication metadata retained on the private worker event channel.
 - Native agent skills, rules, hooks, MCP servers, memory and subagents remain
   active in the ACP agent. Advertised commands and invocable skills are added
-  to OpenCode's startup command catalogue when available.
+  to OpenCode's startup command catalogue when available. Cursor task events,
+  Claude/Codex subagent calls and Grok subagent lifecycle notifications are
+  rendered as native OpenCode task activity; other agents receive the shared
+  ACP task-shape fallback.
 - Bounded, authenticated NDJSON IPC between the OpenCode plugin and a
   plugin-owned Node worker, including parent-death and idle cleanup.
 
@@ -229,8 +234,9 @@ See [testing](docs/testing.md) for the complete matrix and release procedure.
   internal to that agent.
 - OpenCode-native tools are not injected into the ACP agent as MCP tools.
 - Rewind/fork creates a fresh binding when the selected agent cannot fork.
-- Rich agent-specific timeline cards degrade to generic provider-executed tool
-  cards with structured metadata.
+- Native timeline projection is best-effort: incomplete or unknown agent tool
+  shapes degrade to generic provider-executed cards with structured ACP
+  metadata, while the private worker channel retains the complete event.
 - Hermes is supported through its legacy ACP model surface; its own advertised
   and upstream limitations still apply.
 

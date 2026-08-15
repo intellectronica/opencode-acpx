@@ -216,4 +216,78 @@ describe("RuntimeHost", () => {
     await expect(extension).resolves.toEqual({ accepted: true });
     await host.dispose();
   });
+
+  it("correlates Cursor task notifications that identify only a tool call", async () => {
+    const fake = fakeRuntime();
+    const events: Record<string, unknown>[] = [];
+    let factoryInput: RuntimeFactoryInput | undefined;
+    let finishTurn: (() => void) | undefined;
+    const finished = new Promise<void>((resolve) => {
+      finishTurn = resolve;
+    });
+    fake.runtime.startTurn = vi.fn(() => ({
+      requestId: "request-1",
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "tool_call" as const,
+            text: "Explore",
+            toolCallId: "cursor-task-1",
+            kind: "other" as const,
+            status: "in_progress",
+          };
+          await finished;
+        },
+      },
+      result: finished.then(() => ({
+        status: "completed" as const,
+        stopReason: "end_turn",
+      })),
+      cancel: () => Promise.resolve(),
+      closeStream: () => Promise.resolve(),
+    }));
+    const host = new RuntimeHost({
+      emit: (event) => events.push(event as unknown as Record<string, unknown>),
+      runtimeFactory: (input) => {
+        factoryInput = input;
+        return fake.runtime;
+      },
+    });
+    await host.configure(configuration());
+    await host.startTurn({
+      turnId: "turn-1",
+      serverId: "cursor",
+      sessionKey: "session-1",
+      cwd: process.cwd(),
+      requestId: "request-1",
+      text: "Explore",
+    });
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "turn.event", turnId: "turn-1" }),
+      ),
+    );
+
+    await factoryInput?.compatCallbacks.onExtensionNotification?.(
+      "cursor/task",
+      { toolCallId: "cursor-task-1", description: "Explore" },
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "extension.notification",
+        serverId: "cursor",
+        sessionKey: "session-1",
+        turnId: "turn-1",
+        method: "cursor/task",
+      }),
+    );
+    finishTurn?.();
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "turn.result", turnId: "turn-1" }),
+      ),
+    );
+    await host.dispose();
+  });
 });

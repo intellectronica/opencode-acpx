@@ -79,7 +79,7 @@ interface TurnState {
 
 interface RuntimeHub {
   turns: Map<string, TurnState>;
-  orphans: Map<string, (ElicitationInteraction | ExtensionInteraction)[]>;
+  orphans: Map<string, RuntimeWorkerEvent[]>;
   unsubscribe: () => void;
 }
 
@@ -128,7 +128,8 @@ function runtimeHub(runtime: ProviderRuntime): RuntimeHub {
   hub.unsubscribe = runtime.client.subscribe((event) => {
     if (
       (event.type !== "interaction.elicitation" &&
-        event.type !== "interaction.extension") ||
+        event.type !== "interaction.extension" &&
+        event.type !== "extension.notification") ||
       event.turnId === undefined
     ) {
       return;
@@ -385,6 +386,12 @@ function failClosedGenericInteraction(
   });
 }
 
+function isInformationalCursorExtension(event: ExtensionInteraction): boolean {
+  return (
+    event.method === "cursor/task" || event.method === "cursor/update_todos"
+  );
+}
+
 function updateState(
   state: TurnState,
   event: RuntimeWorkerEvent,
@@ -470,6 +477,27 @@ function streamTurn(
             event.type === "interaction.elicitation" ||
             event.type === "interaction.extension"
           ) {
+            if (
+              event.type === "interaction.extension" &&
+              isInformationalCursorExtension(event)
+            ) {
+              for (const part of translator.extensionNotification({
+                type: "extension.notification",
+                serverId: event.serverId,
+                ...(event.sessionKey === undefined
+                  ? {}
+                  : { sessionKey: event.sessionKey }),
+                ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+                method: event.method,
+                params: event.params,
+              }))
+                controller.enqueue(part);
+              await runtime.client.respondExtension({
+                interactionId: event.interactionId,
+                result: {},
+              });
+              continue;
+            }
             const projection = translator.interaction(event);
             if (projection === undefined) {
               await failClosedGenericInteraction(runtime, event);
@@ -485,6 +513,11 @@ function streamTurn(
             state.usage = translator.usage;
             controller.close();
             return;
+          }
+          if (event.type === "extension.notification") {
+            for (const part of translator.extensionNotification(event))
+              controller.enqueue(part);
+            continue;
           }
           if (event.type === "turn.result") {
             for (const part of translator.terminal(event.result))

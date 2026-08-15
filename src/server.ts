@@ -328,11 +328,24 @@ function injectConfiguration(
     if (!server.enabled) continue;
     const id = providerId(serverId);
     addedProviderIds.push(id);
+    const existing = config.provider[id];
+    const models = buildProviderModels(
+      serverId,
+      server,
+      catalogues.get(serverId),
+    );
     config.provider[id] = {
+      ...existing,
       name: `${resolvePreset(server)?.title ?? serverId} through ACP`,
       npm: providerUrl.href,
-      options: { pluginInstanceId, serverId },
-      models: buildProviderModels(serverId, server, catalogues.get(serverId)),
+      options: { ...existing?.options, pluginInstanceId, serverId },
+      models,
+      ...(existing?.whitelist === undefined
+        ? {}
+        : { whitelist: expandModelFilter(existing.whitelist, models) }),
+      ...(existing?.blacklist === undefined
+        ? {}
+        : { blacklist: expandModelFilter(existing.blacklist, models) }),
     };
     const commandName = `acp-${serverId}`;
     config.command[commandName] ??= {
@@ -469,6 +482,22 @@ function isCatalogueResult(
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function expandModelFilter(
+  configured: string[],
+  models: Record<string, ProviderModelConfig>,
+): string[] {
+  const modelIds = Object.keys(models);
+  return unique(
+    configured.flatMap((configuredId) => {
+      if (models[configuredId] !== undefined) return [configuredId];
+      const parameterised = modelIds.filter((modelId) =>
+        modelId.startsWith(`${configuredId}[`),
+      );
+      return parameterised.length === 0 ? [configuredId] : parameterised;
+    }),
+  );
 }
 
 function serverWorkingDirectory(
