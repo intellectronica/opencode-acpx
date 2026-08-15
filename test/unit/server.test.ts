@@ -164,6 +164,48 @@ describe("server plugin", () => {
     await hooks.dispose?.();
   });
 
+  it("keeps whitelisted models visible and routable when catalogue discovery fails", async () => {
+    const worker = fakeWorker();
+    worker.catalogue.mockRejectedValue(new Error("catalogue unavailable"));
+    const hooks = await createServerPlugin({
+      createWorkerClient: () => worker as unknown as WorkerClient,
+      pluginInstanceId: () => "instance-catalogue-fallback",
+    })(pluginInput(), options());
+    const config: Config = {
+      provider: {
+        "acp.cursor": { whitelist: ["grok-4.6", "composer"] },
+      },
+    };
+
+    await hooks.config?.(config);
+
+    expect(config.provider?.["acp.cursor"]?.models).toMatchObject({
+      "grok-4.6": { name: "grok-4.6" },
+      composer: { name: "composer" },
+    });
+    const output = {
+      temperature: 0,
+      topP: 1,
+      topK: 0,
+      maxOutputTokens: undefined,
+      options: {},
+    };
+    await hooks["chat.params"]?.(
+      {
+        sessionID: "fallback-session",
+        agent: "build",
+        model: { providerID: "acp.cursor", id: "grok-4.6" },
+        provider: {},
+        message: { id: "fallback-message" },
+      } as never,
+      output,
+    );
+    expect(output.options).toMatchObject({
+      opencodeAcpx: { modelId: "grok-4.6" },
+    });
+    await hooks.dispose?.();
+  });
+
   it("routes only the matching provider and closes its session on deletion", async () => {
     const worker = fakeWorker();
     const plugin = createServerPlugin({

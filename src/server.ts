@@ -511,9 +511,11 @@ function injectConfiguration(
     const id = providerId(serverId);
     addedProviderIds.push(id);
     const existing = config.provider[id];
-    const models =
-      providerProjections.get(serverId)?.models ??
-      buildProviderModels(serverId, server, catalogues.get(serverId));
+    const projection =
+      providerProjections.get(serverId) ??
+      buildProviderProjection(serverId, server, catalogues.get(serverId));
+    ensureFilteredModelFallbacks(projection, server, existing?.whitelist);
+    const models = projection.models;
     config.provider[id] = {
       ...existing,
       name: `${providerDisplayName(serverId, server)} (ACP)`,
@@ -552,6 +554,41 @@ function injectConfiguration(
     ]);
   }
   injectSkillPaths(config as ConfigWithSkills, options, input);
+}
+
+function ensureFilteredModelFallbacks(
+  projection: ProviderProjection,
+  server: ServerConfig,
+  whitelist: readonly string[] | undefined,
+): void {
+  for (const modelId of whitelist ?? []) {
+    if (
+      modelId.length === 0 ||
+      modelId === "default" ||
+      projection.models[modelId] !== undefined
+    ) {
+      continue;
+    }
+    const configured = server.models[modelId];
+    const selection: AcpModelSelection = {
+      modelId,
+      config: { ...server.config },
+    };
+    const variants = mergeConfiguredVariants(selection, {}, configured);
+    projection.models[modelId] = modelConfig(
+      configured?.name ?? modelId,
+      configured,
+      selection,
+      variants,
+    );
+    projection.routes.set(modelRouteKey(modelId), selection);
+    for (const [variantId, variant] of Object.entries(variants)) {
+      projection.routes.set(
+        modelRouteKey(modelId, variantId),
+        variant.selection,
+      );
+    }
+  }
 }
 
 function injectSkillPaths(

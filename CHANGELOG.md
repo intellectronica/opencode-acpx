@@ -21,6 +21,8 @@ plugin contract.
 
 ### Fixed
 
+- Keep whitelisted ACP providers visible and their exact model IDs routable
+  when a startup catalogue probe is temporarily unavailable.
 - Keep every effort/fast combination available when an ACP session's sticky
   current selection changes.
 - Handle OpenCode title/summary/compaction agents locally so one user turn does
